@@ -1,0 +1,24 @@
+# 本机运行时产物：绝对路径、账号作息、插件安装记录
+logs/
+backups/
+state/
+
+# 本机配置：由 setup.ps1 从 config/settings.example.json 生成
+config/settings.json
+config/plugins.json
+config/plugins/
+
+# 临时/杂项
+*.tmp
+*.bak
+Thumbs.db
+.DS_Store
+# 编译产物永不入仓(C# 面板用 tools/panel-cs/build.ps1 现编现用；内置件用 tools/rustcore/build.ps1 现编)
+*.exe
+tools/_probe*.ps1
+# 跨平台指挥台(Tauri+Vite+TS，tools/gdops)：依赖/前端产物/Rust 目标树不入仓
+tools/gdops/node_modules/
+tools/gdops/dist/
+tools/gdops/src-tauri/target/
+tools/gdops/src-tauri/target-alt/
+tools/gdops/src-tauri/gen/

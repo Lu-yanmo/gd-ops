@@ -1,0 +1,21 @@
+# 行尾规矩：这套脚本要在 Windows 上被 cmd.exe 和 pwsh 7 直接跑，行尾/编码不是审美问题，是能不能跑起来的问题。
+#   .ps1  = LF + UTF-8 BOM(2026-10-06 起 BOM 是推荐项：缺了只提示不报红；想统一就 tools/check-ps51.ps1 -Fix)
+#   .cmd  = CRLF、无 BOM(cmd.exe 不认 LF，也不吃 BOM)
+* text=auto eol=lf
+*.ps1  text eol=lf
+*.cmd  text eol=crlf
+*.bat  text eol=crlf
+*.json text eol=lf
+*.md   text eol=lf
+*.csv  text eol=lf
+
+# 别对脚本做 diff 时的空白合并，行尾本身就是被检查的对象
+*.ps1 -whitespace
+*.cmd -whitespace
+
+# 二进制
+*.png binary
+*.ico binary
+*.exe binary
+*.dll binary
+*.zip binary

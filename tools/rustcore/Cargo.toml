@@ -1,0 +1,30 @@
+[package]
+name = "gdprobe"
+version = "0.0.0"
+edition = "2021"
+publish = false
+autobins = false
+description = """
+换宿主方案(Rust 核) R0 只读探针。契约号 RustCore-R0.1。
+本 crate 零外部依赖：Win32 走 kernel32 直接 FFI，不引 windows/winapi 之类 crate，
+免得在"换宿主"这件还没验证成不成的事上先背一层供应链。
+"""
+
+# 两个 bin、同一份源码：gdprobe 是旁路探针(R0 起，不进包)；gdcore 是 R3 内置件(进包，名字见
+# docs\r0-adrs.md §5.3-3 / §5.6⑤ 拍的板)。gdcore 侧那枚是 #[path] 模块壳，头注里记着
+# 另两条备选(include! / 同 path 双 bin)的实测结果。autobins 关掉 = 只认下面两条显式声明。
+[[bin]]
+name = "gdprobe"
+path = "src/main.rs"
+
+[[bin]]
+name = "gdcore"
+path = "src/bin/gdcore.rs"
+
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+# 故意**不**设 panic = "abort"：那样虽然天然不会 unwind 跨边界，但探针就变成"有 bug 就整个死掉、
+# 读数一条都不剩"。§11.2 的口径是 panic 不许跨 FFI 边界，主函数里用 catch_unwind 兜住，
+# 崩在中间也要把"崩在哪"吐出来。这条决定本身要记进读数表。

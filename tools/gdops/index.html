@@ -1,0 +1,121 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>GD-OPS · 游戏自动化指挥台</title>
+<link rel="stylesheet" href="/src/style.css">
+</head>
+<body>
+<div class="scanband"></div>
+<div id="boot"><div class="bt">GD-OPS</div><div class="bs">游戏自动化指挥台 · LINKING</div><div class="bar"><i></i></div></div>
+
+<header class="topbar" data-tauri-drag-region>
+  <div class="brand" data-tauri-drag-region>
+    <svg width="30" height="30" viewBox="0 0 34 34"><polygon points="17,2 31,10 31,24 17,32 3,24 3,10" fill="none" stroke="var(--accent)" stroke-width="1.5"/><polygon points="17,9 25,13.5 25,22.5 17,27 9,22.5 9,13.5" fill="var(--accent-dim)" stroke="var(--accent)" stroke-width="1"/><circle cx="17" cy="17" r="2.4" fill="var(--accent)"/></svg>
+    <div data-tauri-drag-region><h1 data-tauri-drag-region>GD-OPS</h1><small data-tauri-drag-region>游戏自动化指挥台 · GAME DAILY</small></div>
+  </div>
+  <div class="chips" data-tauri-drag-region>
+    <div class="chip"><span class="dot" id="svDot"></span>监督心跳 <b id="svBeat">pid 4321 · 3s</b></div>
+    <div class="chip">内核 <b id="coreChip">live · K2.1</b></div>
+    <div class="chip">下次窗口 <b id="nextWin">T---:--:--</b></div>
+    <div class="chip click" id="alertChip" title="点击切换警戒演练"><span class="dot" id="alertDot"></span>警戒 <b id="alertLevel">GREEN</b></div>
+    <div class="chip demo" id="modeChip">演示数据 DEMO</div>
+  </div>
+  <div class="clockbox" data-tauri-drag-region><div class="time" id="clock">--:--:--</div><div class="date" id="dateline">---- · UTC+8</div></div>
+  <button class="btn" id="dryBtn">今天会跑什么</button>
+  <button class="btn" id="healthBtn">环境体检</button>
+  <button class="btn" id="runBtn">开始跑一轮</button>
+  <button class="btn danger" id="stopBtn">停</button>
+  <div class="wctl" id="wctl" aria-label="窗口控制">
+    <button class="wbtn" data-w="min" title="最小化" aria-label="最小化"><i></i></button>
+    <button class="wbtn" data-w="max" title="最大化" aria-label="最大化"><i></i></button>
+    <button class="wbtn close" data-w="close" title="关闭" aria-label="关闭"><i></i></button>
+  </div>
+</header>
+
+<main class="console">
+  <div class="col">
+    <section class="panel" style="--d:.10s;flex:0 0 auto">
+      <div class="panel-h"><span class="cn">游戏路</span><span class="en">GAMES · -Games</span><span class="idx">01</span></div>
+      <div class="panel-b"><div class="games" id="games"></div></div>
+    </section>
+    <section class="panel" style="--d:.18s;flex:1">
+      <div class="panel-h"><span class="cn">任务链</span><span class="en" id="chainEn">CHAIN · ARK</span><span class="idx">02</span></div>
+      <div class="panel-b"><div class="chain" id="chain"></div></div>
+    </section>
+  </div>
+
+  <div class="col center">
+    <section class="panel" style="--d:.14s;flex:1.1">
+      <div class="panel-h"><span class="cn">执行现场</span><span class="en">LIVE · SUPERVISION + VISION</span><span class="idx">03</span></div>
+      <div class="panel-b">
+        <div class="live">
+          <div class="vframe" id="vframe">
+            <span class="tag">最近救援截图 · 演示</span>
+            <div class="cross"></div>
+            <div class="cap" id="vcap">state/rescue/ark-stall1-1109-181204-before.png（演示占位）</div>
+          </div>
+          <div class="supkv">
+            <div class="kv"><span class="k">状态 state</span><span class="v" id="svState">idle</span></div>
+            <div class="kv"><span class="k">助手存活 alive</span><span class="v" id="svAlive">—</span></div>
+            <div class="kv"><span class="k">日志年龄 asst_age</span><span class="v" id="svAge">—</span></div>
+            <div class="kv"><span class="k">干预 action</span><span class="v" id="svAction">none</span></div>
+            <div class="kv"><span class="k">视觉救援预算</span><span class="pips" id="pips"><i></i><i></i><span class="v" style="margin-left:4px">2/2</span></span></div>
+            <div class="kv"><span class="k">模型账 calls</span><span class="v" id="vcalls">qwen-vl · 200 · 1.8s</span></div>
+            <div class="acts"><button class="btn mini" id="askBtn">只问不点</button><button class="btn mini" id="shotBtn">看最新截图</button></div>
+          </div>
+        </div>
+      </div>
+    </section>
+    <section class="panel" style="--d:.24s;flex:1">
+      <div class="panel-h"><span class="cn">运行日志</span><span class="en">run-*.log TAIL</span><span class="idx">04</span></div>
+      <div class="panel-b flush">
+        <div class="logbar">
+          <span class="fchip on" data-f="ALL">全部</span><span class="fchip" data-f="STEP">STEP</span><span class="fchip" data-f="OK">OK</span><span class="fchip" data-f="WARN">WARN</span><span class="fchip" data-f="ERROR">ERROR</span>
+          <span class="sp"></span>
+          <span class="fchip on" id="followChip">跟随</span>
+          <button class="btn mini" id="logdirBtn">打开日志目录</button>
+        </div>
+        <div class="log" id="log"></div>
+      </div>
+    </section>
+  </div>
+
+  <div class="col">
+    <section class="panel" style="--d:.20s;flex:0 0 auto">
+      <div class="panel-h"><span class="cn">待决策</span><span class="en">DECISIONS · ACK</span><span class="idx">05</span></div>
+      <div class="panel-b"><div class="decs" id="decs"></div></div>
+    </section>
+    <section class="panel" style="--d:.28s;flex:0 0 auto">
+      <div class="panel-h"><span class="cn">调度</span><span class="en">SCHEDULE · TASKS</span><span class="idx">06</span></div>
+      <div class="panel-b">
+        <div class="sched">
+          <div class="next"><b id="cdBig">--:--:--</b><span>NEXT WINDOW 倒计时</span></div>
+          <div class="row">时刻 <span class="tchip" id="t0">07:30</span><span class="tchip" id="t1">19:30</span><button class="btn mini" id="schedBtn">改时间</button></div>
+          <div class="row">任务 <b id="taskNames">GameDaily-0600 / -1800 / -Manual</b></div>
+          <div class="row">错过补跑 <b>startWhenAvailable=on</b> · 上限 3h</div>
+          <div class="last" id="lastRound">上一轮：<b>今日 19:30 · 全成</b> · 24m12s · ark ok / r1999 ok（history.csv 尾行·演示）</div>
+        </div>
+      </div>
+    </section>
+    <section class="panel" style="--d:.34s;flex:1">
+      <div class="panel-h"><span class="cn">快捷开关</span><span class="en">RUNTIME</span><button class="btn mini" id="fullSet">完整设置</button><button class="btn mini" id="diagBtn">诊断</button><span class="idx">07</span></div>
+      <div class="panel-b">
+        <div class="sws" id="sws"></div>
+      </div>
+    </section>
+  </div>
+</main>
+
+<footer class="ticker">
+  <span class="tag" id="modeTag">PROTOTYPE · 演示数据 · 未接真实内核</span>
+  <div class="rail"><div class="train" id="train"></div></div>
+  <span class="tag" id="platTag">GDCore-K2.1</span>
+</footer>
+
+<div id="modal"><div class="box"><button class="btn mini mx" id="mClose">关闭</button><h3 id="mTitle"></h3><div class="mb" id="mBody"></div></div></div>
+
+<script type="module" src="/src/main.ts"></script>
+</body>
+</html>

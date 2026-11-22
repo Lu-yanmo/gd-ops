@@ -25,6 +25,7 @@
   <div class="clockbox" data-tauri-drag-region><div class="time" id="clock">--:--:--</div><div class="date" id="dateline">---- · UTC+8</div></div>
   <button class="btn" id="dryBtn">今天会跑什么</button>
   <button class="btn" id="healthBtn">环境体检</button>
+  <button class="btn" id="assistBtn">助手</button>
   <button class="btn" id="runBtn">开始跑一轮</button>
   <button class="btn danger" id="stopBtn">停</button>
   <div class="wctl" id="wctl" aria-label="窗口控制">
@@ -41,8 +42,8 @@
       <div class="panel-b"><div class="games" id="games"></div></div>
     </section>
     <section class="panel" style="--d:.18s;flex:1">
-      <div class="panel-h"><span class="cn">任务链</span><span class="en" id="chainEn">CHAIN · ARK</span><span class="idx">02</span></div>
-      <div class="panel-b"><div class="chain" id="chain"></div></div>
+      <div class="panel-h"><span class="cn">任务队列</span><span class="en" id="qEn">QUEUE · MAA</span><span class="idx">02</span></div>
+      <div class="panel-b"><div class="queue" id="queue"></div></div>
     </section>
   </div>
 
@@ -68,8 +69,12 @@
         </div>
       </div>
     </section>
+    <section class="panel" style="--d:.19s;flex:.85">
+      <div class="panel-h"><span class="cn">本路读数</span><span class="en" id="chainEn">CHAIN · ARK</span><span class="idx">04</span></div>
+      <div class="panel-b"><div class="chain" id="chain"></div></div>
+    </section>
     <section class="panel" style="--d:.24s;flex:1">
-      <div class="panel-h"><span class="cn">运行日志</span><span class="en">run-*.log TAIL</span><span class="idx">04</span></div>
+      <div class="panel-h"><span class="cn">运行日志</span><span class="en">run-*.log TAIL</span><span class="idx">05</span></div>
       <div class="panel-b flush">
         <div class="logbar">
           <span class="fchip on" data-f="ALL">全部</span><span class="fchip" data-f="STEP">STEP</span><span class="fchip" data-f="OK">OK</span><span class="fchip" data-f="WARN">WARN</span><span class="fchip" data-f="ERROR">ERROR</span>
@@ -84,11 +89,11 @@
 
   <div class="col">
     <section class="panel" style="--d:.20s;flex:0 0 auto">
-      <div class="panel-h"><span class="cn">待决策</span><span class="en">DECISIONS · ACK</span><span class="idx">05</span></div>
+      <div class="panel-h"><span class="cn">待决策</span><span class="en">DECISIONS · ACK</span><span class="idx">06</span></div>
       <div class="panel-b"><div class="decs" id="decs"></div></div>
     </section>
     <section class="panel" style="--d:.28s;flex:0 0 auto">
-      <div class="panel-h"><span class="cn">调度</span><span class="en">SCHEDULE · TASKS</span><span class="idx">06</span></div>
+      <div class="panel-h"><span class="cn">调度</span><span class="en">SCHEDULE · TASKS</span><span class="idx">07</span></div>
       <div class="panel-b">
         <div class="sched">
           <div class="next"><b id="cdBig">--:--:--</b><span>NEXT WINDOW 倒计时</span></div>
@@ -100,7 +105,7 @@
       </div>
     </section>
     <section class="panel" style="--d:.34s;flex:1">
-      <div class="panel-h"><span class="cn">快捷开关</span><span class="en">RUNTIME</span><button class="btn mini" id="fullSet">完整设置</button><button class="btn mini" id="diagBtn">诊断</button><span class="idx">07</span></div>
+      <div class="panel-h"><span class="cn">快捷开关</span><span class="en">RUNTIME</span><button class="btn mini" id="fullSet">完整设置</button><button class="btn mini" id="diagBtn">诊断</button><span class="idx">08</span></div>
       <div class="panel-b">
         <div class="sws" id="sws"></div>
       </div>

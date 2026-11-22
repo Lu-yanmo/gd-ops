@@ -1,7 +1,9 @@
 // 桥接层：UI 只依赖这个接口。web 浏览器走 DemoBridge（演示数据，与原型逐字同源）；
-// Tauri 壳走 TauriBridge（mode=live：只读实况快照；点火/写入留到下一阶段）。
+// Tauri 壳走 TauriBridge（mode=live：状态走核内 summary，控制走内核 verb / 入口脚本）。
 // shell 表示宿主（web 浏览器 / tauri 桌面壳），mode 表示内核（demo 演示 / live 真实）。
-import type { AppInfo, GameId, Snapshot } from './types';
+import type { ActResult, AppInfo, AssistState, GameId, Snapshot } from './types';
+import type { SummaryModel } from './summary';
+import { parseSummary } from './summary';
 import { esc, humanAge, pad } from './util';
 
 export type ChainStart = { ok: boolean; pid?: number; script?: string; error?: string };
@@ -12,6 +14,7 @@ export interface Bridge {
   mode: 'demo' | 'live';
   appInfo(): Promise<AppInfo>;
   snapshot(fresh?: boolean): Promise<Snapshot | null>;  // 只读实况；浏览器/demo 恒 null
+  summary(fresh?: boolean): Promise<SummaryModel | null>; // 核内协议 v2（状态真身）；demo 恒 null
   chainRun(kind: 'dry'): Promise<ChainStart>;         // 起一轮 -DryRun 预演（只有 Tauri 壳能起）
   chainStop(): Promise<boolean>;                      // 结束本应用起的进程树
   onChainLine(cb: (stream: string, line: string) => void): void;
@@ -19,15 +22,33 @@ export interface Bridge {
   dryRun(): Promise<string>;         // 今天会跑什么 → 模态 HTML
   health(): Promise<string>;         // 环境体检 → 模态 HTML
   openLogDir(): Promise<string>;     // 打开日志目录
-  visionAsk(): Promise<string>;      // 只问不点
+  visionAsk(): Promise<string>;      // 只问不点（说明/演示）
+  visionAskLive(game: string | null): Promise<ActResult>;  // 真跑 vision-ask.ps1
   latestShot(): Promise<string>;     // 看最新截图
   fullSettings(): Promise<string>;   // 完整设置
   diagnostics(): Promise<string>;    // 诊断打包
   auditEvidence(): Promise<string>;  // 活动审计证据
   setSwitch(key: string, on: boolean): Promise<void>;
-  ack1999(): Promise<void>;
-  shopMark(game: GameId, on: boolean): Promise<void>;
-  reschedule(times: number[]): Promise<void>;
+  ack1999(): Promise<void>;          // demo 用；live 走 markFlag
+  shopMark(game: GameId, on: boolean): Promise<void>;      // demo 用；live 走 markFlag
+  startRound(games: string | null): Promise<ActResult>;    // 真点火（task 优先，退回自提权入口）
+  stopRound(): Promise<ActResult>;                          // run-via-task.ps1 -Stop
+  markFlag(flag: string): Promise<ActResult>;              // -<flag> -DryRun -NoElevate
+  rescheduleTimes(times: string[]): Promise<ActResult>;    // reschedule-daily.ps1（自提权）
+  /* 助手通道（MAA / M9A）：读现状、改计划、几枚真操作。demo 恒不可用。 */
+  assistState(): Promise<AssistState | null>;
+  assistSavePlan(edits: { key: string; value: unknown }[]): Promise<ActResult>;
+  assistM9aSwitch(id: string, name: string): Promise<ActResult>;
+  assistMaaSetTask(kind: string, enable: boolean): Promise<ActResult>;
+  assistMaaSetAll(enable: boolean): Promise<ActResult>;
+  /* 右侧二级框：一条 MAA 任务的若干键（原位改写；MAA 在跑拒写） */
+  assistMaaSaveTask(idx: number, taskType: string, name: string, patch: Record<string, unknown>): Promise<ActResult>;
+  assistMaaClose(): Promise<ActResult>;
+  assistArkStart(): Promise<ActResult>;
+  assistM9aStop(): Promise<ActResult>;
+  assistMumuStart(): Promise<ActResult>;
+  assistMumuStop(): Promise<ActResult>;
+  assistM9aUpdate(): Promise<ActResult>;
 }
 
 const DEMO_INFO: AppInfo = { app: 'gd-ops', version: '0.1.0', platform: 'web', arch: '—' };
@@ -38,6 +59,7 @@ export class DemoBridge implements Bridge {
   mode: 'demo' | 'live' = 'demo';
   async appInfo(): Promise<AppInfo> { return DEMO_INFO; }
   async snapshot(): Promise<Snapshot | null> { return null; }
+  async summary(): Promise<SummaryModel | null> { return null; }
   async chainRun(_kind: 'dry'): Promise<ChainStart> { return { ok: false, error: '浏览器演示模式不起进程（桌面壳里才有预演）' }; }
   async chainStop(): Promise<boolean> { return false; }
   onChainLine(_cb: (stream: string, line: string) => void): void { /* 演示无流 */ }
@@ -69,10 +91,26 @@ export class DemoBridge implements Bridge {
   async setSwitch(_key: string, _on: boolean): Promise<void> { /* 演示：状态翻转与日志在 state 层 */ }
   async ack1999(): Promise<void> { /* 演示 */ }
   async shopMark(_game: GameId, _on: boolean): Promise<void> { /* 演示 */ }
-  async reschedule(_times: number[]): Promise<void> { /* 演示 */ }
+  async visionAskLive(_game: string | null): Promise<ActResult> { return { ok: false, error: '浏览器演示模式不起进程' }; }
+  async startRound(_games: string | null): Promise<ActResult> { return { ok: false, error: '浏览器演示模式不起进程（桌面壳里才点火）' }; }
+  async stopRound(): Promise<ActResult> { return { ok: false, error: '浏览器演示模式没有可停的轮' }; }
+  async markFlag(_flag: string): Promise<ActResult> { return { ok: false, error: '浏览器演示模式不写门状态' }; }
+  async rescheduleTimes(_times: string[]): Promise<ActResult> { return { ok: false, error: '浏览器演示模式不重注册定时' }; }
+  async assistState(): Promise<AssistState | null> { return null; }
+  async assistSavePlan(_edits: { key: string; value: unknown }[]): Promise<ActResult> { return { ok: false, error: '浏览器演示模式不改配置' }; }
+  async assistM9aSwitch(_id: string, _name: string): Promise<ActResult> { return { ok: false, error: '浏览器演示模式不起进程' }; }
+  async assistMaaSetTask(_kind: string, _enable: boolean): Promise<ActResult> { return { ok: false, error: '浏览器演示模式不改配置' }; }
+  async assistMaaSetAll(_enable: boolean): Promise<ActResult> { return { ok: false, error: '浏览器演示模式不改配置' }; }
+  async assistMaaSaveTask(_idx: number, _taskType: string, _name: string, _patch: Record<string, unknown>): Promise<ActResult> { return { ok: false, error: '浏览器演示模式不改配置' }; }
+  async assistMaaClose(): Promise<ActResult> { return { ok: false, error: '浏览器演示模式不起进程' }; }
+  async assistArkStart(): Promise<ActResult> { return { ok: false, error: '浏览器演示模式不起进程' }; }
+  async assistM9aStop(): Promise<ActResult> { return { ok: false, error: '浏览器演示模式不起进程' }; }
+  async assistMumuStart(): Promise<ActResult> { return { ok: false, error: '浏览器演示模式不起进程' }; }
+  async assistMumuStop(): Promise<ActResult> { return { ok: false, error: '浏览器演示模式不起进程' }; }
+  async assistM9aUpdate(): Promise<ActResult> { return { ok: false, error: '浏览器演示模式不起进程' }; }
 }
 
-type Invoke = (cmd: string) => Promise<unknown>;
+interface Invoke { (cmd: string, args?: Record<string, unknown>): Promise<unknown> }
 type Listen = (evt: string, cb: (e: { payload: unknown }) => void) => Promise<() => void>;
 
 function todayStr(): string {
@@ -104,6 +142,10 @@ export class TauriBridge extends DemoBridge {
         platform: typeof v.platform === 'string' ? v.platform : DEMO_INFO.platform,
         arch: typeof v.arch === 'string' ? v.arch : DEMO_INFO.arch,
         autodry: v.autodry === true,
+        autoassist: v.autoassist === true,
+        autotab: typeof v.autotab === 'string' ? v.autotab : undefined,
+        autosel: typeof v.autosel === 'string' ? v.autosel : undefined,
+        autodrawer: typeof v.autodrawer === 'string' ? v.autodrawer : undefined,
       };
     } catch { return DEMO_INFO; }
   }
@@ -117,6 +159,79 @@ export class TauriBridge extends DemoBridge {
       return this.cache;
     } catch { return this.cache; }
   }
+
+  // 状态真身：核内 emit-panel-summary（协议 v2）。解析失败就回 null，让上层显示"读不出"而不是旧值装新。
+  override async summary(): Promise<SummaryModel | null> {
+    try { return parseSummary(await this.invoke('panel_summary')); } catch { return null; }
+  }
+
+  private async act(cmd: string, args?: Record<string, unknown>): Promise<ActResult> {
+    try {
+      const r = await this.invoke(cmd, args);
+      const v = r as ActResult;
+      if (v && typeof v.ok === 'boolean') return v;
+      return { ok: false, error: cmd + ' 返回形态异常' };
+    } catch (e) {
+      // Tauri 拒绝时会带 Rust 侧的 Err 字符串（找不到根/缺 CLI/锁占用…），原样透出。
+      return { ok: false, error: String(e) };
+    }
+  }
+
+  override async startRound(games: string | null): Promise<ActResult> {
+    return this.act('start_round', { games });
+  }
+
+  override async stopRound(): Promise<ActResult> {
+    return this.act('stop_round');
+  }
+
+  override async markFlag(flag: string): Promise<ActResult> {
+    return this.act('mark_flag', { flag });
+  }
+
+  override async rescheduleTimes(times: string[]): Promise<ActResult> {
+    return this.act('reschedule', { times });
+  }
+
+  override async visionAskLive(game: string | null): Promise<ActResult> {
+    return this.act('vision_ask_live', { game });
+  }
+
+  override async assistState(): Promise<AssistState | null> {
+    try {
+      const raw = await this.invoke('assist_state');
+      const v = raw as AssistState;
+      if (v && typeof v.settingsPresent === 'boolean') return v;
+      return null;
+    } catch { return null; }
+  }
+
+  override async assistSavePlan(edits: { key: string; value: unknown }[]): Promise<ActResult> {
+    return this.act('assist_save_plan', { edits });
+  }
+
+  override async assistM9aSwitch(id: string, name: string): Promise<ActResult> {
+    return this.act('assist_m9a_switch', { id, name });
+  }
+
+  override async assistMaaSetTask(kind: string, enable: boolean): Promise<ActResult> {
+    return this.act('assist_maa_set_task', { kind, enable });
+  }
+
+  override async assistMaaSetAll(enable: boolean): Promise<ActResult> {
+    return this.act('assist_maa_set_all', { enable });
+  }
+
+  override async assistMaaSaveTask(idx: number, taskType: string, name: string, patch: Record<string, unknown>): Promise<ActResult> {
+    return this.act('assist_maa_save_task', { idx, taskType, name, patch });
+  }
+
+  override async assistMaaClose(): Promise<ActResult> { return this.act('assist_maa_close'); }
+  override async assistArkStart(): Promise<ActResult> { return this.act('assist_ark_start'); }
+  override async assistM9aStop(): Promise<ActResult> { return this.act('assist_m9a_stop'); }
+  override async assistMumuStart(): Promise<ActResult> { return this.act('assist_mumu_start'); }
+  override async assistMumuStop(): Promise<ActResult> { return this.act('assist_mumu_stop'); }
+  override async assistM9aUpdate(): Promise<ActResult> { return this.act('assist_m9a_update'); }
 
   override async chainRun(_kind: 'dry'): Promise<ChainStart> {
     try {

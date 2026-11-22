@@ -4,31 +4,43 @@ import * as S from './state';
 import { openModal } from './modal';
 import type { Bridge } from './bridge';
 import type { GameId, Level } from './types';
+import { ackFlagFor, chainRowsFor, shopFlagsFor, registeredOf } from './summary';
+import { kick } from './live';
+import { syncChainButtons } from './chain';
 
 let bridge: Bridge;
 
 /* ── 游戏卡 ── */
 function renderGames(): void {
   const el = $('#games'); el.innerHTML = '';
+  if (S.GAME_IDS.length === 0) {
+    const empty = document.createElement('div');
+    empty.className = 'gcard';
+    empty.innerHTML = '<div class="r1"><span class="dot idle"></span><span class="nm">没有注册的插件路</span><span class="code">PLUGINS 0</span><span class="st">idle</span></div>' +
+      '<div class="r2"><span class="plan">lib/*-module.ps1 一个都没有：装上 ark / r1999 插件包后这边自动长卡</span></div>' +
+      '<div class="r3"><span class="inc">下轮包含</span><button class="btn mini run" disabled>只跑这一路</button></div>';
+    el.appendChild(empty);
+    return;
+  }
   S.GAME_IDS.forEach((k) => {
     const g = S.GAMES[k];
+    if (!g) return;
     const card = document.createElement('div');
     card.className = 'gcard' + (S.sel === k ? ' sel' : '');
     const dotCls = g.status === 'idle' ? 'idle' : (g.status === 'fail' ? 'crit' : (g.status === 'stopped' ? 'warn' : ''));
+    const frac = g.steps.length ? Math.round(g.done / g.steps.length * 100) + '%' : '—';
+    const fracText = g.steps.length ? g.done + '/' + g.steps.length : 'live';
     card.innerHTML = '<div class="r1"><span class="dot ' + dotCls + '"></span><span class="nm">' + esc(g.cn) + '</span><span class="code">' + esc(g.code) + '</span><span class="st">' + esc(g.status) + '</span></div>' +
-      '<div class="r2"><span class="plan">' + esc(g.plan) + '</span><span class="bar"><i style="width:' + (g.done / g.steps.length * 100) + '%"></i></span><span class="frac">' + g.done + '/' + g.steps.length + '</span></div>' +
+      '<div class="r2"><span class="plan">' + esc(g.plan) + '</span><span class="bar"><i style="width:' + frac + '"></i></span><span class="frac">' + esc(fracText) + '</span></div>' +
       '<div class="r3"><span class="inc' + (g.inc ? ' on' : '') + '" data-inc="' + k + '"><i></i>下轮包含</span><button class="btn mini run" data-run="' + k + '">只跑这一路</button></div>';
-    if (bridge.mode === 'live') {
-      const rb = card.querySelector('[data-run]') as HTMLButtonElement | null;
-      if (rb) { rb.disabled = true; rb.title = '只读阶段：点火未接入（下一阶段）'; }
+    const rb = card.querySelector('[data-run]') as HTMLButtonElement | null;
+    if (rb) {
+      rb.disabled = S.running;
+      rb.title = S.running ? '已有一轮在跑（等它结束或先点「停」）' : ('起一轮：' + g.cn + '（task 优先；无 task 走自提权入口）');
     }
-    card.addEventListener('click', (e) => {
+    card.addEventListener('click', async (e) => {
       const t = e.target as HTMLElement;
-      if (bridge.mode === 'live' && (t.dataset.run || t.dataset.inc || (t.parentElement && t.parentElement.dataset.inc))) {
-        S.pushLog('WARN', '只读阶段：点火/选路写入未接入（下一阶段）');
-        return;
-      }
-      if (t.dataset.run) { S.startRound([t.dataset.run as GameId]); return; }
+      if (t.dataset.run) { await runOne(t.dataset.run as GameId); return; }
       const inc = t.dataset.inc || (t.parentElement ? t.parentElement.dataset.inc : undefined);
       if (inc) { S.toggleInc(inc as GameId); return; }
       S.setSel(k);
@@ -40,11 +52,58 @@ function renderGames(): void {
   el.appendChild(slot);
 }
 
+// 只跑这一路：live 走内核真点火（一次点击即确认——按钮本身已写明只跑哪一路）；demo 走演示时间线。
+async function runOne(k: GameId): Promise<void> {
+  if (bridge.mode !== 'live') { S.startRound([k]); return; }
+  if (S.running) { S.pushLog('WARN', '已有一轮在跑 · 忽略本次点火'); return; }
+  S.pushLog('STEP', '点火：只跑 ' + k + '（内核通道）');
+  const r = await bridge.startRound(k);
+  if (r.ok) S.pushLog('OK', '已发起（' + (r.carrier === 'task' ? '计划任务' : '自提权入口') + '）· ' + (r.note || 'pid ' + (r.pid || 0)));
+  else S.pushLog('ERROR', '点火失败：' + (r.error || '未知错误'));
+  kick();
+}
+
 /* ── 任务链 ── */
 function renderChain(): void {
-  const g = S.GAMES[S.sel];
-  $('#chainEn').textContent = 'CHAIN · ' + g.code;
+  syncChainButtons();   // 真轮的「停」要随运行锁翻牌，不只跟预演
   const el = $('#chain'); el.innerHTML = '';
+  const g = S.GAMES[S.sel];
+  if (!g) {
+    $('#chainEn').textContent = 'CHAIN · —';
+    const e = document.createElement('div');
+    e.className = 'step';
+    e.innerHTML = '<span class="n">—</span><span>没有注册的插件路：装上插件包后这里显示门/探针/最近一轮的实读</span>';
+    el.appendChild(e);
+    return;
+  }
+  $('#chainEn').textContent = 'CHAIN · ' + g.code;
+
+  // live：没有逐步骤，列门/探针/最近一轮 + 本轮 pid（不冒充阶段进度）。
+  if (bridge.mode === 'live') {
+    if (!S.model) {
+      const e = document.createElement('div');
+      e.className = 'step';
+      e.innerHTML = '<span class="n">!</span><span>内核 summary 读不出（panel-cs.exe / 插件注册表）</span>';
+      el.appendChild(e);
+      return;
+    }
+    const rows = chainRowsFor(S.model, S.sel, S.run);
+    if (!rows.length) {
+      const e = document.createElement('div');
+      e.className = 'step';
+      e.textContent = '这一路还没有门/探针/历史读数（跑一轮后落盘）';
+      el.appendChild(e);
+      return;
+    }
+    rows.forEach((r, i) => {
+      const d = document.createElement('div');
+      d.className = 'step ' + r.cls;
+      d.innerHTML = '<span class="n">' + pad(i + 1) + '</span><span>' + esc(r.text) + '</span>' + (r.badge ? '<span class="badge">' + esc(r.badge) + '</span>' : '');
+      el.appendChild(d);
+    });
+    return;
+  }
+
   g.steps.forEach((s, i) => {
     const st = S.stepState[S.sel + ':' + i] || '';
     let badge = '';
@@ -75,7 +134,84 @@ function renderLog(): void {
 }
 
 /* ── 待决策 ── */
+function emptyDec(text: string): void {
+  const e = document.createElement('div');
+  e.className = 'dec empty';
+  e.textContent = text;
+  $('#decs').appendChild(e);
+}
+
+function decCard(title: string, why: string, acts: { label: string; attr: string; value: string; disabled?: boolean }[]): void {
+  const d = document.createElement('div');
+  d.className = 'dec';
+  d.innerHTML = '<div class="t">' + esc(title) + '</div><div class="why">' + esc(why) + '</div><div class="acts">' +
+    acts.map((a) => '<button class="btn mini" ' + a.attr + '="' + esc(a.value) + '"' + (a.disabled ? ' disabled title="有一轮在跑：门旗标等本轮结束再落"' : '') + '>' + esc(a.label) + '</button>').join('') +
+    '</div>';
+  $('#decs').appendChild(d);
+}
+
+async function markFlag(flag: string): Promise<void> {
+  if (S.running) { S.pushLog('WARN', '本轮在跑：门旗标等结束再落'); return; }
+  S.pushLog('STEP', '落门：-' + flag + ' -DryRun -NoElevate（只写字号门，不点火）');
+  const r = await bridge.markFlag(flag);
+  if (r.ok) S.pushLog('OK', '-' + flag + ' 已写入（干跑只落门状态）');
+  else S.pushLog('ERROR', '-' + flag + ' 没写成：exit ' + (r.code ?? '?') + (r.error ? ' · ' + r.error : ''));
+  for (const l of (r.lines || []).slice(-6)) S.pushLog(r.ok ? 'INFO' : 'WARN', l);
+  kick();
+}
+
+function renderDecsLive(): void {
+  const el = $('#decs'); el.innerHTML = '';
+  const m = S.model;
+  if (!m) { emptyDec('内核 summary 读不出：决策要读核内的门状态'); return; }
+  const ids = m.games.map((g) => g.id);
+  if (!ids.length) { emptyDec('没有注册的插件路：装插件后才有关可确认'); return; }
+
+  // 主线确认：旗标取入口声明（单插件树 Ack；合并树 -Ack1999 兜底，见 summary.ts）。
+  const ackFlag = ackFlagFor(m);
+  const ackGame = ids.includes('r1999') ? 'r1999' : ids[0];
+  if (ackFlag && !S.ack1999) {
+    decCard(ackGame + ' 主线未确认 · event-pending',
+      '确认后写 -' + ackFlag + '；干跑只落门、不点火。',
+      [
+        { label: '确认主线已打 (-' + ackFlag + ')', attr: 'data-ackflag', value: ackFlag, disabled: S.running },
+        { label: '看审计证据', attr: 'data-evi', value: '1' },
+      ]);
+  }
+
+  for (const k of ids) {
+    const g = S.GAMES[k];
+    const code = g ? g.code : k.toUpperCase();
+    const sf = shopFlagsFor(m, k);
+    if (!sf) {
+      decCard(code + ' 商店领空：入口未声明旗标',
+        '这一路没有 -ShopDone 类开关；面板不造按钮（要开先在入口声明）。', []);
+      continue;
+    }
+    const marked = !!S.shop[k];
+    decCard(code + ' 商店领空标记：' + (marked ? '已领空' : '未标记'),
+      '标记后活动轮停商店队列；干跑只落门、不点火。',
+      [
+        marked
+          ? { label: '撤销 (-' + sf.reset + ')', attr: 'data-flag', value: sf.reset, disabled: S.running }
+          : { label: '标记领空 (-' + sf.done + ')', attr: 'data-flag', value: sf.done, disabled: S.running },
+      ]);
+  }
+  if (!el.children.length) emptyDec('当前无待决策 · 门全绿');
+
+  el.querySelectorAll<HTMLButtonElement>('button[data-ackflag],button[data-flag]').forEach((b) => {
+    b.addEventListener('click', () => {
+      const flag = b.dataset.ackflag || b.dataset.flag;
+      if (flag) void markFlag(flag);
+    });
+  });
+  el.querySelectorAll<HTMLButtonElement>('button[data-evi]').forEach((b) => {
+    b.addEventListener('click', () => { void bridge.auditEvidence().then((h) => openModal('活动审计证据', h)); });
+  });
+}
+
 function renderDecs(): void {
+  if (bridge.mode === 'live') { renderDecsLive(); return; }
   const el = $('#decs'); el.innerHTML = '';
   if (!S.ack1999) {
     const d = document.createElement('div'); d.className = 'dec';
@@ -101,29 +237,21 @@ function renderDecs(): void {
       }
     });
   });
-  if (bridge.mode === 'live') {
-    // 审计证据是只读查看，留着；确认/商店标记是写路径，只读阶段禁掉。
-    el.querySelectorAll<HTMLButtonElement>('button[data-a="ack"], button[data-shop]').forEach((b) => {
-      b.disabled = true;
-      b.title = '只读阶段：写入未接入（下一阶段）';
-    });
-    const n = document.createElement('div');
-    n.className = 'dec empty';
-    n.textContent = '只读阶段：确认 / 商店标记写入未接入';
-    el.appendChild(n);
-  }
 }
 
 /* ── 快捷开关 ── */
+// 本次不接写路径：核内还没有 set-runtime-flag 这类 verb，写 settings.json 又要密钥/备份纪律。
+// 宁可直接标"未接"，也不做一个点了没反应的假开关。
 function renderSws(): void {
   const el = $('#sws'); el.innerHTML = '';
   S.SW.forEach((s) => {
     const d = document.createElement('div');
-    d.className = 'sw' + (s.on ? ' on' : '') + (bridge.mode === 'live' ? ' ro' : '');
-    if (bridge.mode === 'live') d.title = '只读阶段：写配置未接入（下一阶段）';
+    // live 里这些开关的 on/off 是演示值、面板没读真身：不许拿绿点冒充已开启。
+    d.className = 'sw' + (bridge.mode === 'live' ? ' ro' : (s.on ? ' on' : ''));
+    if (bridge.mode === 'live') d.title = '未接写路径：核内还没有 runtime 旗标 verb（读写都要另立一道门）';
     d.innerHTML = '<i></i><span>' + esc(s.label) + '</span><span class="key">' + esc(s.key) + '</span>';
     d.addEventListener('click', () => {
-      if (bridge.mode === 'live') { S.pushLog('WARN', '只读阶段：开关写配置未接入（下一阶段）'); return; }
+      if (bridge.mode === 'live') { S.pushLog('WARN', '快捷开关未接：核内没有 runtime 旗标 verb（这次不写配置）'); return; }
       void bridge.setSwitch(s.key, !s.on);
       S.toggleSwitch(s.key);
     });
@@ -132,7 +260,7 @@ function renderSws(): void {
   if (bridge.mode === 'live') {
     const n = document.createElement('div');
     n.className = 'sw ro';
-    n.innerHTML = '<i></i><span>只读阶段 · 开关写配置未接入</span><span class="key">read-only</span>';
+    n.innerHTML = '<i></i><span>runtime 开关未接写路径</span><span class="key">read-only</span>';
     el.appendChild(n);
   }
 }
@@ -164,9 +292,25 @@ function paintTheme(): void {
 
 /* ── 调度/时钟/跑马灯 ── */
 function renderSched(): void {
-  $('#t0').textContent = pad(S.times[0]) + ':00';
-  $('#t1').textContent = pad(S.times[1]) + ':00';
-  $('#taskNames').textContent = 'GameDaily-' + pad(S.times[0]) + '00 / -' + pad(S.times[1]) + '00 / -Manual';
+  $('#t0').textContent = S.times[0] || '--:--';
+  $('#t1').textContent = S.times[1] || '--:--';
+  if (bridge.mode === 'live') {
+    const m = S.model;
+    if (m) {
+      const reg = registeredOf(m);
+      const names = m.time.map((r) => {
+        const t = (r.text.match(/^(\d{1,2}:\d{2})/) || [])[1] || r.text;
+        return t + (/未注册/.test(r.text) ? '·未注册' : '·已注册');
+      });
+      $('#taskNames').textContent = names.length ? names.join(' / ') : '没有时刻（config 里 schedule.times 为空）';
+      $('#taskNames').title = '注册 ' + reg.ok + '/' + reg.total + ' · TIME 行来自核内计划任务查询';
+    } else {
+      $('#taskNames').textContent = '内核 summary 读不出';
+    }
+    $('#lastRound').innerHTML = sanitize(S.lastRoundHtml);
+    return;
+  }
+  $('#taskNames').textContent = 'GameDaily-' + (S.times[0] || '----').replace(':', '') + ' / -' + (S.times[1] || '----').replace(':', '') + ' / -Manual';
   $('#lastRound').innerHTML = sanitize(S.lastRoundHtml);   // 内部模板（<b>+数值），仍过白名单清洗
 }
 export function tickClock(): void {

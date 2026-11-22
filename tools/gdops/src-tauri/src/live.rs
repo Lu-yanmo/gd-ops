@@ -169,6 +169,89 @@ fn running(list: &[String], names: &[&str]) -> bool {
     list.iter().any(|p| names.iter().any(|n| p.eq_ignore_ascii_case(n)))
 }
 
+/// 给控制面用的进程判活：按进程名（不带 .exe）逐枚比，不看注册表。
+pub fn any_running(names: &[&str]) -> bool {
+    let names: Vec<&str> = names.iter().copied().filter(|n| !n.is_empty()).collect();
+    if names.is_empty() {
+        return false;
+    }
+    running(&list_procs(), &names)
+}
+
+// 判活：tasklist 按 PID 过滤。查询失败（本机工具异常）宁可当真——防二次点火。
+#[cfg(target_os = "windows")]
+pub fn pid_alive(pid: u32) -> bool {
+    use std::os::windows::process::CommandExt;
+    let out = std::process::Command::new("tasklist")
+        .args(["/FI", &format!("PID eq {pid}"), "/FO", "CSV", "/NH"])
+        .creation_flags(0x0800_0000)
+        .output();
+    match out {
+        Ok(o) => {
+            let s = String::from_utf8_lossy(&o.stdout);
+            let t = s.trim();
+            !(t.is_empty() || t.starts_with("INFO:") || t.contains("No tasks"))
+        }
+        Err(_) => true,
+    }
+}
+
+#[cfg(not(target_os = "windows"))]
+pub fn pid_alive(pid: u32) -> bool {
+    std::process::Command::new("kill")
+        .args(["-0", &pid.to_string()])
+        .status()
+        .map(|s| s.success())
+        .unwrap_or(true)
+}
+
+fn get_ci<'a>(v: &'a Value, key: &str) -> Option<&'a Value> {
+    v.as_object()?
+        .iter()
+        .find(|(k, _)| k.eq_ignore_ascii_case(key))
+        .map(|(_, x)| x)
+}
+
+fn str_ci(v: &Value, key: &str) -> String {
+    match get_ci(v, key) {
+        Some(Value::String(s)) => s.clone(),
+        Some(Value::Number(n)) => n.to_string(),
+        Some(Value::Bool(b)) => b.to_string(),
+        _ => String::new(),
+    }
+}
+
+// 运行锁 state\running.json：写侧在核内（start-run-lock），这里只读不写。
+// 两把尺与原生面板同一档：pid 不在 ⇒ 不在跑；pid 在 ⇒ 在跑；读不出来 ⇒ 当成没锁（核会自愈，
+// 否则一次坏文件会把面板永久挡在门外）。日志路径是双重转义，按核内口径还原一次。
+pub fn run_lock(root: &Path) -> Option<Value> {
+    let p = root.join("state").join("running.json");
+    if !p.is_file() {
+        return None;
+    }
+    let text = match fs::read_to_string(&p) {
+        Ok(t) => t,
+        Err(_) => return None,
+    };
+    let v: Value = match serde_json::from_str(&text) {
+        Ok(v) => v,
+        Err(_) => return None,
+    };
+    let pid = str_ci(&v, "pid").parse::<u32>().unwrap_or(0);
+    let alive = pid > 0 && pid_alive(pid);
+    let log = str_ci(&v, "log").replace("\\\\", "\\");
+    Some(json!({
+        "found": pid > 0,
+        "alive": alive,
+        "pid": pid,
+        "started": str_ci(&v, "started"),
+        "games": str_ci(&v, "games"),
+        "tag": str_ci(&v, "tag"),
+        "log": log,
+        "ageSecs": age_secs(&p).unwrap_or(0),
+    }))
+}
+
 // history.csv 一行：双引号字段可含逗号。
 fn split_csv(line: &str) -> Vec<String> {
     let mut out = Vec::new();
@@ -391,6 +474,7 @@ pub fn collect() -> Value {
         "arkGate": ark_gate,
         "plans": { "ark": plans.0, "r1999": plans.1 },
         "shots": list_shots(&root),
+        "run": run_lock(&root),
         "supervision": supervision,
         "vision": vision,
         "audit": audit,

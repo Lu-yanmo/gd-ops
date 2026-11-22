@@ -4,10 +4,12 @@ import { $, sanitize } from './util';
 export function openModal(title: string, html: string): void {
   $('#mTitle').textContent = title;
   $('#mBody').innerHTML = sanitize(html);
+  $('#modal').classList.remove('assist');
   $('#modal').classList.add('open');
 }
 export function closeModal(): void {
   $('#modal').classList.remove('open');
+  $('#modal').classList.remove('assist');
 }
 export function wireModal(): void {
   $('#mClose').addEventListener('click', closeModal);

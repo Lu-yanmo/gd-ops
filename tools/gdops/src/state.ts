@@ -1,7 +1,9 @@
 // 状态机：数据与演示轮时间线，自原型 hud.html 内联脚本逐行移植。
 // 本模块不碰 DOM：改完状态发总线事件（games/chain/log/decs/sws/pips/theme/live/sched），渲染层订阅。
+// live 模式下 GAME_IDS/GAMES/times/门状态全部由 summary（核内 emit-panel-summary）灌进来，不写死两路。
 import { dstr, now, rnd, esc, emit, REDUCED } from './util';
-import type { Ev, Game, GameId, Level, LogLine, SwitchDef } from './types';
+import { gateState, timesOf, type SummaryModel } from './summary';
+import type { Ev, Game, GameId, GameStatus, Level, LogLine, RunLock, SwitchDef } from './types';
 
 export const GAME_IDS: GameId[] = ['ark', 'r1999'];
 export const GAMES: Record<GameId, Game> = {
@@ -18,13 +20,18 @@ export let filter: 'ALL' | Level = 'ALL';
 export let drill = false;
 export let warnAuto = false;
 export let rescueUsed = 0;
-export let times: number[] = [6, 18];
+export let times: string[] = ['07:30', '19:30'];   // live 由 TIME 行覆盖；演示值只是占位
 export let ack1999 = false;
 export const shop: Record<GameId, boolean> = { ark: false, r1999: false };
 export const stepState: Record<string, string> = {};
 export const LOGLINES: LogLine[] = [];
 // 日志序号：渲染层据此判断「这次重绘有没有新行」，只给最新一行贴入场动画。
 export let logSeq = 0;
+
+// live 数据面：summary 是唯一状态真身；run 是 state\running.json 的只读视图。
+export let model: SummaryModel | null = null;
+export let run: RunLock | null = null;
+let lastSig = '';
 
 export const SW: SwitchDef[] = [
   { label: '重试一次', key: 'retryOnce', on: true },
@@ -49,13 +56,20 @@ let evq: Ev[] = [];
 let evTimer: number | null = null;
 
 /* ── 时钟与倒计时 ── */
+function hhmm(s: string): number {
+  const p = s.split(':');
+  const h = parseInt(p[0], 10);
+  const m = parseInt(p[1], 10);
+  return (isNaN(h) ? 0 : h) * 60 + (isNaN(m) ? 0 : m);
+}
 export function nextWindow(): string {
+  if (!times.length) return '--:--:--';
   const d = new Date();
   const mins = d.getHours() * 60 + d.getMinutes() + d.getSeconds() / 60;
   let best: number | null = null;
   for (let add = 0; add < 2; add++) {
-    for (const h of times) {
-      const t = h * 60 + add * 1440;
+    for (const s of times) {
+      const t = hhmm(s) + add * 1440;
       if (t > mins && (best === null || t < best)) best = t;
     }
   }
@@ -90,6 +104,99 @@ export function setLastRound(html: string): void {
   emit('sched');
 }
 
+/* ── live 数据面：summary（核内状态真身）+ 运行锁 ── */
+function inRoundGames(): GameId[] {
+  if (!run || !run.alive) return [];
+  const g = (run.games || '').trim();
+  if (!g || g === 'all') return GAME_IDS.slice();
+  return g.split(/[, ]+/).filter(Boolean);
+}
+
+// 插件注册表是唯一游戏来源：GAME 行有几路就有几张卡；零插件就是零张。
+// 上一轮的"下轮包含"勾选、计划行、当前选择按 id 继承（刷新不该把手上的选择抖掉）。
+export function applySummary(m: SummaryModel): void {
+  model = m;
+  const prevSel = sel;
+  const incPrev: Record<string, boolean> = {};
+  const planPrev: Record<string, string> = {};
+  for (const k of GAME_IDS) {
+    if (!GAMES[k]) continue;
+    incPrev[k] = GAMES[k].inc;
+    planPrev[k] = GAMES[k].plan;
+  }
+  for (const k of Object.keys(GAMES)) delete GAMES[k];
+  GAME_IDS.length = 0;
+  const live = inRoundGames();
+  for (const g of m.games) {
+    const last = m.last.filter((r) => r.game === g.id).slice(-1)[0];
+    let status: GameStatus = 'idle';
+    if (live.includes(g.id)) status = 'run';
+    else if (last) status = last.kind === 'ok' ? 'ok' : (last.kind === 'err' ? 'fail' : 'stopped');
+    GAME_IDS.push(g.id);
+    GAMES[g.id] = {
+      cn: g.short,
+      code: g.short.toUpperCase(),
+      inc: incPrev[g.id] !== false,
+      plan: planPrev[g.id] || '待读判定',
+      done: 0,
+      status,
+      steps: [],
+    };
+  }
+  sel = GAME_IDS.includes(prevSel) ? prevSel : (GAME_IDS[0] || '');
+
+  const t = timesOf(m);
+  if (t.length) times = t;
+
+  for (const k of Object.keys(shop)) delete shop[k];
+  for (const g of m.games) shop[g.id] = gateState(m, g.id, '商店领空：已标记');
+  ack1999 = gateState(m, 'r1999', '活动确认：已确认');
+
+  // 只在协议面真的变了才重画：8 秒轮询不该把面板刷得一直闪。
+  const sig = JSON.stringify([m.games, m.time, m.last, m.gates, m.flags]);
+  if (sig !== lastSig) {
+    lastSig = sig;
+    emit('games'); emit('chain'); emit('decs'); emit('sched');
+  }
+}
+
+// live 开机先把演示数据清空：真身没到之前宁可显"没有注册的插件路"，也不拿演示卡糊住面板。
+export function enterLive(): void {
+  for (const k of Object.keys(GAMES)) delete GAMES[k];
+  GAME_IDS.length = 0;
+  sel = '';
+  times = [];
+  for (const k of Object.keys(shop)) delete shop[k];
+  ack1999 = false;
+  lastRoundHtml = '';
+  live.state = 'idle';
+  live.alive = '—';
+  live.age = '—';
+  live.action = 'none';
+  live.vcap = '—';
+  live.vcalls = '—';
+}
+
+// 运行锁：起/停只在这里翻一次牌（日志也只写一次），轮询本身不刷屏。
+export function setRun(l: RunLock | null): void {
+  const was = !!(run && run.alive);
+  run = l;
+  const alive = !!(l && l.alive);
+  running = alive;
+  const live = inRoundGames();
+  for (const k of GAME_IDS) {
+    const g = GAMES[k];
+    if (!g) continue;
+    if (alive && live.includes(k)) { g.status = 'run'; g.done = 0; }
+    else if (g.status === 'run') g.status = 'idle';
+  }
+  if (was !== alive) {
+    if (alive) pushLog('STEP', '本轮开始 · 锁 pid ' + (l ? l.pid : 0) + ' · tag ' + (l ? (l.tag || '?') : '?') + ' · games ' + (l && l.games ? l.games : 'all'));
+    else pushLog('OK', '本轮结束 · 运行锁已释放');
+  }
+  emit('games'); emit('chain'); emit('live');
+}
+
 /* ── 选择/开关类动作 ── */
 export function setSel(g: GameId): void { sel = g; emit('games'); emit('chain'); }
 export function toggleInc(g: GameId): void {
@@ -104,7 +211,7 @@ export function toggleDrill(): void {
   pushLog('INFO', '警戒演练 ' + (drill ? '启动' : '解除'));
 }
 export function bootDrill(): void { drill = true; emit('theme'); }   // hash 钩子用：静默置位
-export function setTimes(t: number[]): void { times = t; emit('sched'); }
+export function setTimes(t: string[]): void { times = t; emit('sched'); }
 export function toggleAck(): void {
   ack1999 = true;
   pushLog('OK', '-Ack1999 已标记 · event-pending 解除');

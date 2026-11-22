@@ -15,17 +15,25 @@ let hooks: Hooks = { setStreaming: () => { /* 未接时静默 */ }, refresh: () 
 
 export function wireChain(_bridge: Bridge, h: Hooks): void { hooks = h; }
 
-// 真点火那一枚始终禁用（本阶段只跑预演）；「今天会跑什么」与「停」按是否在跑切换。
+// 预演与真轮共用同一枚「停」：预演走本应用进程树，真轮走 run-via-task.ps1 -Stop。
 export function syncChainButtons(): void {
   const dry = document.getElementById('dryBtn') as HTMLButtonElement | null;
   const stop = document.getElementById('stopBtn') as HTMLButtonElement | null;
+  const run = document.getElementById('runBtn') as HTMLButtonElement | null;
+  if (run) {
+    run.disabled = chain.running || S.running;
+    run.title = run.disabled ? '已有一轮在跑：等它结束或先点「停」' : '';
+  }
   if (dry) {
     dry.disabled = chain.running;
     dry.title = chain.running ? '预演进行中：等它跑完，或点「停」中断' : '';
   }
   if (stop) {
-    stop.disabled = !chain.running;
-    stop.title = chain.running ? '中断本轮预演（只结束本应用起的 pwsh 进程树）' : '当前没有在跑的预演';
+    const busy = chain.running || S.running;
+    stop.disabled = !busy;
+    stop.title = chain.running
+      ? '中断本轮预演（只结束本应用起的 pwsh 进程树）'
+      : (S.running ? '停止本轮：run-via-task.ps1 -Stop（提权轮不硬杀）' : '当前没有在跑的轮');
   }
 }
 

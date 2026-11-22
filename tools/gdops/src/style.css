@@ -3,6 +3,7 @@
    label=Chakra Petch(按钮/标题/标签) · mono=Kode Mono(日志/代码/键名)。中文落系统栈。
    动画约定：循环动画只走 transform/opacity；入场一次性；prefers-reduced-motion 全兜底。 */
 :root{
+  color-scheme:dark;
   --bg0:#04070d; --bg1:#0a1220; --panel:rgba(8,16,29,.78);
   --line:rgba(53,224,255,.16); --line-strong:rgba(53,224,255,.42);
   --accent:#35e0ff; --accent-dim:rgba(53,224,255,.12); --accent-glow:rgba(53,224,255,.5);
@@ -108,7 +109,7 @@ body::after{content:"";position:fixed;inset:0;z-index:91;pointer-events:none;opa
 .panel-h .btn.mini{white-space:nowrap;padding:3px 8px}
 .btn:disabled{opacity:.35;cursor:not-allowed}
 
-.console{display:grid;grid-template-columns:300px minmax(0,1fr) 340px;gap:12px;padding:12px 14px;min-height:0}
+.console{display:grid;grid-template-columns:300px minmax(0,1fr) 340px;gap:12px;padding:12px 14px;min-height:0;position:relative}
 .col{display:flex;flex-direction:column;gap:12px;min-height:0}
 .panel{position:relative;display:flex;flex-direction:column;min-height:0;background:var(--panel);
   border:1px solid var(--line);backdrop-filter:blur(3px);
@@ -152,7 +153,61 @@ body::after{content:"";position:fixed;inset:0;z-index:91;pointer-events:none;opa
 .gcard .run{margin-left:auto}
 .gslot{border:1px dashed var(--line);padding:8px;text-align:center;font-size:9px;letter-spacing:2px;color:var(--muted)}
 
-/* 任务链：在跑步每拍一道扫光（一次性 .8s，与事件拍同节奏） */
+/* 任务队列（左列 02）：跟随选路切 MAA 任务清单 / M9A 实例清单。
+   勾选=改 settings 名单（下一轮生效）；齿轮=就地展开白名单参数。 */
+.queue{display:flex;flex-direction:column;gap:1px;height:100%;min-height:0;overflow-y:auto;overflow-x:hidden;padding-right:2px;
+  scrollbar-width:thin;scrollbar-color:rgba(53,224,255,.28) transparent}
+.queue::-webkit-scrollbar{width:6px}
+.queue::-webkit-scrollbar-thumb{background:rgba(53,224,255,.22)}
+.qHead{display:flex;flex-wrap:wrap;gap:5px;padding:1px 0 6px;flex:none}
+.qChip{font-size:8px;letter-spacing:1px;color:var(--muted);border:1px solid var(--line);padding:2px 6px;white-space:nowrap}
+.qChip b{font-weight:500;color:var(--muted)}
+.qChip.on b{color:var(--ok)}
+.qRow{display:flex;align-items:center;gap:6px;padding:5px;border:1px solid transparent;border-left:2px solid var(--line);flex:none;
+  transition:border-color .2s,background .2s}
+.qRow:hover{border-color:var(--line);border-left-color:var(--line-strong);background:rgba(53,224,255,.04)}
+.qRow.on{border-left-color:var(--accent)}
+.qRow.cur{border-left-color:var(--ok);background:rgba(82,255,168,.06)}
+.qCk{flex:none;width:13px;height:13px;padding:0;border:1px solid var(--line-strong);background:transparent;position:relative;cursor:pointer;
+  transition:background .2s,border-color .2s,box-shadow .2s}
+.qCk:hover{border-color:var(--accent)}
+.qCk.on{background:var(--accent);border-color:var(--accent);box-shadow:0 0 6px var(--accent-glow)}
+.qCk.on::after{content:"";position:absolute;left:3.5px;top:1px;width:3px;height:6px;
+  border:solid #04121c;border-width:0 2px 2px 0;transform:rotate(45deg)}
+.qCk:focus-visible,.qGear:focus-visible,.qTog:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.qCkPh{flex:none;width:13px;height:13px;border:1px dashed var(--line);opacity:.5}
+.qDot{flex:none;width:7px;height:7px;border:1px solid var(--line-strong)}
+.qRow.cur .qDot{background:var(--ok);border-color:var(--ok);box-shadow:0 0 6px rgba(82,255,168,.6)}
+.qName{font-size:11px;letter-spacing:.5px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;min-width:0;flex:1}
+.qTag{flex:none;font-size:8px;letter-spacing:1px;padding:1px 4px;border:1px solid var(--line-strong);color:var(--accent)}
+.qTag.ok{border-color:rgba(82,255,168,.5);color:var(--ok)}
+.qMeta{flex:none;font-family:var(--font-mono);font-size:8.5px;color:var(--muted);max-width:92px;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
+.qGear{flex:none;width:18px;height:18px;padding:0;border:none;background:transparent;color:var(--muted);font-size:11px;line-height:1;
+  cursor:pointer;transition:color .2s,transform .25s}
+.qGear:hover{color:var(--accent);transform:rotate(45deg)}
+.qGear:disabled{opacity:.35;cursor:not-allowed}
+.qRow .btn.mini{flex:none;padding:2px 5px;font-size:8.5px;letter-spacing:.5px}
+.qSub{margin:1px 0 5px 18px;border-left:2px solid var(--line-strong);padding:5px 0 6px 10px;display:flex;flex-direction:column;gap:5px;flex:none;
+  background:linear-gradient(90deg,rgba(53,224,255,.05),transparent);animation:qSubIn .22s var(--ease-out)}
+@keyframes qSubIn{from{opacity:0;transform:translateY(-3px)}to{opacity:1;transform:none}}
+.qF{display:grid;grid-template-columns:78px minmax(0,1fr);align-items:center;gap:6px;font-size:9.5px;color:var(--muted)}
+.qIn{width:100%;min-width:0;background:rgba(4,10,18,.8);border:1px solid var(--line);color:var(--text);
+  font-family:var(--font-mono);font-size:10px;padding:3px 6px;outline:none;transition:border-color .2s}
+.qIn:focus{border-color:var(--accent)}
+.qIn.bad{border-color:var(--crit)}
+.qTog{justify-self:start;min-width:38px;border:1px solid var(--line-strong);background:transparent;color:var(--muted);
+  font-family:var(--font-label);font-size:9px;letter-spacing:1px;padding:2px 7px;cursor:pointer;transition:color .2s,border-color .2s,background .2s}
+.qTog.on{border-color:var(--accent);background:var(--accent-dim);color:var(--accent)}
+.qHint{font-style:normal;font-size:8.5px;line-height:1.6;color:var(--muted);letter-spacing:.3px}
+.qSubActs{display:flex;gap:6px;margin-top:1px}
+.qFoot{position:sticky;bottom:0;z-index:2;margin-top:auto;flex:none;display:flex;gap:6px;padding:7px 0 2px;border-top:1px solid var(--line);
+  background:rgba(6,12,22,.94);backdrop-filter:blur(3px)}
+.qEmpty{font-size:9.5px;line-height:1.7;color:var(--muted);padding:5px 2px;letter-spacing:.5px}
+.qEmpty.warn{color:var(--warn)}
+.arm{border-color:var(--warn) !important;color:var(--warn) !important;background:rgba(255,194,77,.08) !important}
+
+/* 本路读数（中列 04，原「任务链」）：在跑步每拍一道扫光（一次性 .8s，与事件拍同节奏） */
 .chain{display:flex;flex-direction:column;gap:4px;height:100%;overflow:hidden}
 .step{display:grid;grid-template-columns:16px 1fr auto;align-items:center;gap:8px;padding:4px 6px;font-size:11px;letter-spacing:.5px;border-left:2px solid transparent}
 .step .n{font-family:var(--font-num);font-size:9px;color:var(--muted)}
@@ -168,6 +223,9 @@ body::after{content:"";position:fixed;inset:0;z-index:91;pointer-events:none;opa
 .step.run .badge{border-color:var(--accent);color:var(--accent)}
 .step.retry .badge{border-color:var(--warn);color:var(--warn)}
 .step.rescued .badge{border-color:var(--ok);color:var(--ok)}
+.step.fail{border-left-color:var(--crit)}
+.step.fail .n{color:var(--crit)}
+.step.fail .badge{border-color:var(--crit);color:var(--crit)}
 
 /* 执行现场 */
 .live{display:grid;grid-template-columns:minmax(0,1.25fr) minmax(0,1fr);gap:12px;height:100%}
@@ -282,6 +340,133 @@ body::after{content:"";position:fixed;inset:0;z-index:91;pointer-events:none;opa
 #modal .mx{position:absolute;top:8px;right:10px}
 #modal input[type=time]{background:rgba(6,14,26,.8);border:1px solid var(--line-strong);color:var(--accent);
   font-family:var(--font-num);font-size:13px;padding:4px 8px}
+
+/* 左侧二级框：任务全量参数（MAA）/ 实例详情（M9A）。
+   开在左列（01 游戏路 / 02 任务队列）右边，**悬浮盖上去**：绝对定位、z 在面板之上，
+   栅格列数与各列宽度全程不变（不挤压中列/右列）；宽度留出右列 340 不压右列内容。 */
+.drPanel{position:absolute;top:12px;bottom:12px;left:326px;width:min(480px,calc(100% - 692px));z-index:80;
+  display:flex;flex-direction:column;min-height:0;overflow:hidden;
+  background:linear-gradient(180deg,rgba(8,16,29,.995),rgba(4,9,16,.995));border:1px solid var(--line-strong);
+  box-shadow:0 18px 50px rgba(0,0,0,.55),-10px 0 30px rgba(0,0,0,.35);
+  animation:none;
+  transform:translateX(-14px);opacity:0;transition:transform .26s var(--ease-out),opacity .18s ease}
+.drPanel.on{transform:none;opacity:1}
+.drPanel .panel-h .en{min-width:0;overflow:hidden;text-overflow:ellipsis}
+.drX{margin-left:auto;flex:none;width:24px;height:22px;padding:0;border:1px solid var(--line);background:transparent;
+  color:var(--muted);font-size:15px;line-height:1;cursor:pointer;transition:color .15s,border-color .15s}
+.drX:hover{color:var(--crit);border-color:var(--crit)}
+.drX:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.drBody{flex:1;overflow-y:auto;padding:8px 16px 20px;scrollbar-width:thin;scrollbar-color:rgba(53,224,255,.3) transparent}
+.drBody::-webkit-scrollbar{width:6px}
+.drBody::-webkit-scrollbar-thumb{background:rgba(53,224,255,.22)}
+.drG{margin-top:12px}
+.drG:first-child{margin-top:2px}
+.drG h3{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin:0 0 3px;padding-bottom:4px;
+  border-bottom:1px solid var(--line);font-size:9px;font-weight:500;letter-spacing:2.5px;color:var(--accent)}
+.drG h3 small{font-size:8px;font-weight:400;letter-spacing:1px;color:var(--muted)}
+.drF{display:grid;grid-template-columns:132px minmax(0,1fr);gap:6px 10px;align-items:start;padding:4px 0;
+  border-bottom:1px dashed rgba(53,224,255,.07)}
+.drL{padding-top:5px;font-size:10px;line-height:1.5;color:var(--muted)}
+.drV{min-width:0}
+.drCtl{display:flex;gap:6px}
+.drIn{width:100%;box-sizing:border-box;background:rgba(4,10,18,.8);border:1px solid var(--line);color:var(--text);
+  font-family:var(--font-mono);font-size:11px;padding:4px 7px}
+.drIn:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 1px var(--accent-dim)}
+.drIn.bad{border-color:var(--crit)}
+/* 下拉：去掉系统外观，自带暗底 + 细描边 + 青色小箭头；展开项也压成暗色，别闪一片白 */
+.drSel{appearance:none;-webkit-appearance:none;width:100%;box-sizing:border-box;
+  background-color:rgba(4,10,18,.9);
+  background-image:url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='6'%3E%3Cpath d='M0 0l4.5 6L9 0z' fill='%237fa9b8'/%3E%3C/svg%3E");
+  background-repeat:no-repeat;background-position:right 8px center;background-size:9px 6px;
+  border:1px solid var(--line);color:var(--text);font-family:var(--font-mono);font-size:11px;
+  line-height:1.4;padding:5px 24px 5px 8px;cursor:pointer;
+  transition:border-color .15s,box-shadow .15s,background-color .15s}
+.drSel:hover{border-color:var(--line-strong)}
+.drSel:focus,.drSel:focus-visible{outline:none;border-color:var(--accent);box-shadow:0 0 0 1px var(--accent-dim)}
+.drSel.bad{border-color:var(--crit)}
+.drSel option{background:#08131f;color:var(--text)}
+.drSel option:disabled{color:var(--muted)}
+.drList{display:flex;flex-direction:column;gap:4px}
+.drLi{display:grid;grid-template-columns:minmax(0,1fr) 24px;gap:6px;align-items:center}
+.drLi .drSel{min-width:0}
+.drRm{width:24px;height:24px;padding:0;border:1px solid var(--line);background:transparent;color:var(--muted);
+  font-size:13px;line-height:1;cursor:pointer;transition:color .15s,border-color .15s,background .15s}
+.drRm:hover{color:var(--crit);border-color:var(--crit);background:rgba(255,93,108,.08)}
+.drRm:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.drAdd .drSel{border-style:dashed;color:var(--muted)}
+.drAdd .drSel:hover{color:var(--accent);border-color:var(--line-strong)}
+.drRo{padding:4px 0;font-family:var(--font-mono);font-size:10.5px;line-height:1.5;color:var(--text);word-break:break-all}
+.drK{margin-left:6px;padding:0 4px;border:1px solid rgba(255,194,77,.55);font-size:8px;font-weight:400;
+  letter-spacing:.5px;color:var(--warn);white-space:nowrap}
+.drHint{display:block;margin-top:2px;font-style:normal;font-size:8.5px;line-height:1.5;color:var(--muted);opacity:.8}
+.drRooms{display:flex;flex-direction:column;gap:4px}
+.drRoomRow{display:grid;grid-template-columns:minmax(0,1fr) 88px;gap:8px;align-items:center}
+.drRoomName{font-size:10px;line-height:1.5;color:var(--muted)}
+.drRoomRow .drSel{padding-top:3px;padding-bottom:3px;font-size:10px}
+.drTasks{margin:2px 0 0;padding-left:18px;font-size:10.5px;line-height:1.85;color:var(--text)}
+.drNote{margin-top:12px;padding:6px 9px;border-left:2px solid var(--line-strong);font-size:9px;line-height:1.7;color:var(--muted)}
+.drMsg{min-height:14px;margin-top:10px;font-size:9.5px;line-height:1.6}
+.drMsg.ok{color:var(--ok)}
+.drMsg.bad{color:var(--crit)}
+.drFoot{flex:none;display:flex;align-items:center;justify-content:flex-end;gap:8px;padding:10px 16px;border-top:1px solid var(--line);
+  background:rgba(6,12,22,.96)}
+.drFootHint{flex:1;min-width:0;font-size:8.5px;line-height:1.5;color:var(--muted)}
+@media (max-width:1180px){
+  /* 窄屏二级框退回右侧整高悬浮层（同样覆盖、不挤列） */
+  .drPanel{position:fixed;top:0;right:0;bottom:0;left:auto;width:min(560px,96vw);z-index:120}
+}
+@media (max-width:760px){
+  .drPanel{width:100vw;left:auto;right:0}
+  .drF{grid-template-columns:104px minmax(0,1fr)}
+}
+
+/* 助手（MAA / M9A）：宽版模态 + 两块页签 + 计划表单 + 回执 */
+#modal.assist .box{width:min(880px,94vw);max-height:86vh}
+/* 暗底滚动条：默认白色条在深色 HUD 里像一道裂缝 */
+#modal .box{scrollbar-width:thin;scrollbar-color:rgba(53,224,255,.3) transparent}
+#modal .box::-webkit-scrollbar{width:8px;height:8px}
+#modal .box::-webkit-scrollbar-thumb{background:rgba(53,224,255,.28);border:2px solid transparent;background-clip:content-box}
+#modal .box::-webkit-scrollbar-thumb:hover{background:rgba(53,224,255,.45);background-clip:content-box}
+#modal .box::-webkit-scrollbar-track{background:transparent}
+.asTabs{display:flex;gap:8px;border-bottom:1px solid var(--line);padding-bottom:8px;margin-bottom:8px}
+.asTab{font-family:var(--font-label);font-size:11px;letter-spacing:1.5px;color:var(--muted);background:transparent;
+  border:1px solid var(--line);padding:6px 12px;cursor:pointer;transition:color .2s,border-color .2s,background .2s}
+.asTab:hover{color:var(--text);border-color:var(--line-strong)}
+.asTab.on{color:var(--accent);border-color:var(--accent);background:var(--accent-dim)}
+.asTab:disabled{opacity:.35;cursor:not-allowed}
+.asBusy{margin:2px 0 8px;font-size:10px;letter-spacing:.5px}
+.asHead{display:flex;flex-wrap:wrap;gap:6px;margin:4px 0 2px}
+.asChip{display:inline-flex;align-items:center;gap:5px;border:1px solid var(--line);background:rgba(6,14,26,.55);
+  padding:3px 8px;font-size:10px;color:var(--muted)}
+.asChip.on{border-color:var(--line-strong)}
+.asChip b{font-family:var(--font-num);font-weight:600;font-size:10px}
+.asQRow{display:flex;flex-wrap:wrap;gap:5px;margin-top:4px}
+.asQ{font-family:var(--font-mono);font-size:10px;color:var(--accent);border:1px solid var(--line);
+  background:rgba(6,14,26,.5);padding:2px 7px}
+.asGrid{display:grid;grid-template-columns:1fr 1fr;gap:7px 16px;margin-top:6px}
+.asF{display:grid;grid-template-columns:96px 1fr;align-items:center;gap:8px;min-height:26px}
+.asF>span{font-size:10px;color:var(--muted);letter-spacing:.6px}
+.asF>i{grid-column:2;font-style:normal;font-size:9px;color:var(--muted);opacity:.75;line-height:1.4}
+.asF>input.asIn{grid-column:2;width:100%;box-sizing:border-box;background:rgba(6,14,26,.8);border:1px solid var(--line-strong);
+  color:var(--text);font-family:var(--font-mono);font-size:11px;padding:3px 7px}
+.asF>input.asIn:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 1px var(--accent-dim)}
+.asF>input.asIn:disabled{opacity:.5}
+.asTog{grid-column:2;justify-self:start;font-family:var(--font-label);font-size:10px;letter-spacing:1px;min-width:58px;
+  color:var(--muted);background:transparent;border:1px solid var(--line-strong);padding:3px 10px;cursor:pointer;transition:all .2s}
+.asTog.on{color:var(--accent);border-color:var(--accent);background:var(--accent-dim)}
+.asTog:hover{border-color:var(--accent)}
+.asTog:disabled{opacity:.4;cursor:not-allowed}
+.asRo{font-family:var(--font-mono);font-size:11px;color:var(--text);font-weight:500}
+.asActions{display:flex;flex-wrap:wrap;align-items:center;gap:8px;margin-top:8px}
+.asActions .mut{font-size:9px;letter-spacing:.3px}
+.asNote{margin-top:8px;font-size:9.5px;line-height:1.7;border-left:2px solid var(--line-strong);padding-left:8px}
+.asInst{border:1px solid var(--line);background:rgba(6,14,26,.4);padding:6px 9px;margin-top:5px;font-size:10px;line-height:1.7}
+.asInst.cur{border-color:var(--accent);background:var(--accent-dim)}
+.asInst b{color:var(--text);font-size:11px}
+.asInst .btn.mini{margin-left:6px;vertical-align:middle}
+.asLog{margin-top:4px;border:1px solid var(--line);background:rgba(3,8,16,.7);padding:7px 9px;max-height:170px;overflow:auto;
+  font-family:var(--font-mono);font-size:10px;line-height:1.75;word-break:break-all}
+@media (max-width:720px){ .asGrid{grid-template-columns:1fr} }
 @media (max-width:1180px){
   body{overflow:auto;height:auto;min-height:100vh}
   .console{grid-template-columns:1fr 1fr}

@@ -8,18 +8,21 @@ import '@fontsource/chakra-petch/latin-600.css';
 import '@fontsource/chakra-petch/latin-700.css';
 import '@fontsource-variable/kode-mono';
 import '@fontsource-variable/martian-mono';
-import { $, dstr, esc } from './util';
+import { $, dstr, esc, sanitize } from './util';
 import { createBridge } from './bridge';
 import * as S from './state';
 import { initRender, renderAll, tickClock } from './render';
 import { openModal, closeModal, wireModal } from './modal';
 import { startLive, kick } from './live';
+import { initPreview } from './preview';
 import { chain, startDry, stopChain, syncChainButtons } from './chain';
 import { openAssist } from './assist';
 import { initQueue, autoOpenDrawer } from './queue';
+import { closeDrawer, drawerKey, drawerOpen, openDrawer } from './drawer';
 
 const bridge = createBridge();
 initRender(bridge);
+initPreview(bridge);
 initQueue(bridge);
 wireModal();
 
@@ -141,7 +144,20 @@ $('#askBtn').addEventListener('click', async () => {
     '<div class="sec">说明</div>临时截图用完即删；不注入任何点击。');
 });
 $('#shotBtn').addEventListener('click', () => { void bridge.latestShot().then((h) => openModal('最新救援截图', h)); });
-$('#fullSet').addEventListener('click', () => { void bridge.fullSettings().then((h) => openModal('完整设置', h)); });
+function openSettingsDrawer(): void {
+  if (drawerOpen() && drawerKey() === 'settings') { closeDrawer(); return; }
+  void bridge.fullSettings().then((h) => {
+    const drawer = openDrawer('完整设置', 'SETTINGS · READ ONLY',
+      '<div class="settingsDrawer">' + sanitize(h) + '</div>',
+      '<button type="button" class="btn mini" data-close-settings="1">关闭</button>',
+      'settings', { anchor: 'right' });
+    drawer.foot.querySelector<HTMLButtonElement>('[data-close-settings]')?.addEventListener('click', () => drawer.close());
+  }).catch((e) => S.pushLog('ERROR', '完整设置读取失败：' + String(e)));
+}
+document.addEventListener('click', (e) => {
+  const t = (e.target as HTMLElement).closest<HTMLButtonElement>('[data-drawer-toggle="settings"]');
+  if (t) openSettingsDrawer();
+});
 $('#diagBtn').addEventListener('click', () => { void bridge.diagnostics().then((h) => openModal('诊断打包', h)); });
 
 /* ── 改定时时刻 ── */
@@ -215,12 +231,14 @@ void bridge.appInfo().then((info) => {
   if (bridge.mode === 'live' && (want === 'ark' || want === 'r1999')) {
     window.setTimeout(() => { if (S.GAME_IDS.includes(want)) S.setSel(want); }, 2400);
   }
-  // 验收钩子（GDOPS_AUTODRAWER=1|maa|m9a|maa:<TaskType>）：不点按钮，读数到位后自动拉起右侧二级框
-  //（= 人工点一次齿轮；只开不保存）。用于 UIA 点不到 WebView2 时的截图核对。
+  // 验收钩子（GDOPS_AUTODRAWER=1|maa|m9a|settings|maa:<TaskType>）：不点按钮，读数到位后自动拉起右侧二级框
+  //（= 人工点一次齿轮或完整设置；只开不保存）。用于 UIA 点不到 WebView2 时的截图核对。
   const dw = info.autodrawer || '';
   const isM9a = dw === 'm9a';
   const maaType = dw.startsWith('maa:') ? dw.slice(4) : '';
-  if (bridge.mode === 'live' && (dw === '1' || dw === 'maa' || isM9a || maaType)) {
+  if (bridge.mode === 'live' && dw === 'settings') {
+    window.setTimeout(openSettingsDrawer, 3400);
+  } else if (bridge.mode === 'live' && (dw === '1' || dw === 'maa' || isM9a || maaType)) {
     window.setTimeout(() => { void autoOpenDrawer(isM9a ? 'm9a' : 'maa', maaType); }, 3400);
   }
 });

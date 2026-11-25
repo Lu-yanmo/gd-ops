@@ -2,6 +2,7 @@
 // + 单链预演（chain_run/chain_stop）+ 控制通道（summary/真点火/停止/门旗标/改定时/只问不点）
 // + 助手通道（MAA/M9A 读数、计划改写、几枚真操作）。
 mod assist;
+mod capture;
 mod chain;
 mod control;
 mod live;
@@ -65,6 +66,13 @@ macro_rules! blocking_cmd {
 }
 
 blocking_cmd!(panel_summary, control::summary);
+
+#[tauri::command]
+async fn live_capture(game: String) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || capture::frame(&game))
+        .await
+        .map_err(|e| e.to_string())?
+}
 
 #[tauri::command]
 async fn start_round(games: Option<String>) -> Result<serde_json::Value, String> {
@@ -132,6 +140,17 @@ async fn assist_maa_set_all(enable: bool) -> Result<serde_json::Value, String> {
         .map_err(|e| e.to_string())?
 }
 
+#[tauri::command]
+async fn assist_m9a_save_instance(
+    id: String,
+    name: String,
+    patch: serde_json::Value,
+) -> Result<serde_json::Value, String> {
+    tauri::async_runtime::spawn_blocking(move || assist::m9a_save_instance(id, name, patch))
+        .await
+        .map_err(|e| e.to_string())?
+}
+
 // 右侧二级框保存：一条 MAA 任务的若干键（原位改写 + 备份 + 回读校验；MAA 在跑拒写）。
 #[tauri::command]
 async fn assist_maa_save_task(
@@ -151,6 +170,7 @@ pub fn run() {
         .invoke_handler(tauri::generate_handler![
             app_info,
             live_snapshot,
+            live_capture,
             open_log_dir,
             chain_run,
             chain_stop,
@@ -163,6 +183,7 @@ pub fn run() {
             assist_state,
             assist_save_plan,
             assist_m9a_switch,
+            assist_m9a_save_instance,
             assist_maa_set_task,
             assist_maa_set_all,
             assist_maa_save_task,

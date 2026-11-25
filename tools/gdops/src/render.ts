@@ -3,7 +3,7 @@ import { $, pad, on, esc, now, dstr, sanitize, blip } from './util';
 import * as S from './state';
 import { openModal } from './modal';
 import type { Bridge } from './bridge';
-import type { GameId, Level } from './types';
+import type { GameId, Level, RuntimeFlags } from './types';
 import { ackFlagFor, chainRowsFor, shopFlagsFor, registeredOf } from './summary';
 import { kick } from './live';
 import { syncChainButtons } from './chain';
@@ -240,27 +240,116 @@ function renderDecs(): void {
 }
 
 /* ── 快捷开关 ── */
-// 本次不接写路径：核内还没有 set-runtime-flag 这类 verb，写 settings.json 又要密钥/备份纪律。
-// 宁可直接标"未接"，也不做一个点了没反应的假开关。
+// live 从 settings.json 实读，单键保存后重新读数；写的是下一轮配置，不冒充当前进程已热切换。
+let runtimeFlags: RuntimeFlags = {};
+let runtimePresent = false;
+let runtimeTried = false;
+let runtimeLoading = false;
+let runtimeBusy = '';
+
+async function loadRuntimeFlags(): Promise<boolean> {
+  if (runtimeLoading) return false;
+  runtimeLoading = true;
+  runtimeTried = true;
+  renderSws();
+  try {
+    const s = await bridge.assistState();
+    if (s) {
+      runtimePresent = s.settingsPresent;
+      runtimeFlags = s.runtimeFlags || {};
+      return true;
+    }
+    S.pushLog('ERROR', '右栏开关读数失败：assist_state 没有返回');
+  } catch {
+    S.pushLog('ERROR', '右栏开关读数失败');
+  } finally {
+    runtimeLoading = false;
+    renderSws();
+  }
+  return false;
+}
+
+async function saveRuntimeFlag(key: string): Promise<void> {
+  if (runtimeBusy || runtimeLoading) return;
+  const old = runtimeFlags[key];
+  if (typeof old !== 'boolean') return;
+  runtimeBusy = key;
+  renderSws();
+  try {
+    const path = key === 'notify.toast' ? key : 'runtime.' + key;
+    const r = await bridge.assistSavePlan([{ key: path, value: !old }]);
+    const label = S.SW.find((s) => s.key === key)?.label || key;
+    if (!r.ok) {
+      S.pushLog('ERROR', '开关保存失败：' + key + ' · ' + (r.error || r.note || '未知错误'));
+      if (r.lines?.length) for (const l of r.lines.slice(-6)) S.pushLog('WARN', l);
+    } else {
+      S.pushLog('OK', label + '：配置已保存（下一轮／下一监督进程按新值运行）');
+      if (r.note) S.pushLog('INFO', r.note);
+    }
+    // 后端可能已写盘、只是写后回读校验失败；失败分支也必须重新读数，不能继续拿旧值冒充现状。
+    if (await loadRuntimeFlags()) {
+      const desired = !old;
+      const label = S.SW.find((s) => s.key === key)?.label || key;
+      if (runtimeFlags[key] === desired) {
+        if (!r.ok) S.pushLog('WARN', label + '：保存回执失败，但回读已是要写入的值；请以回读值为准');
+      } else if (r.ok) {
+        S.pushLog('WARN', label + '：保存回执成功，但回读值不一致，请点助手页刷新核对');
+      } else {
+        S.pushLog('WARN', label + '：保存回执失败，回读也不是目标值；请点助手页刷新核对');
+      }
+    } else {
+      // 写后没能重新读数就把状态降为未知，不能把旧值继续冒充已保存后的现值。
+      runtimeFlags = {};
+      S.pushLog('ERROR', label + '：写后回读失败；当前值标为未知，请点助手页刷新核对');
+    }
+  } catch {
+    S.pushLog('ERROR', '开关保存失败：' + key);
+  } finally {
+    runtimeBusy = '';
+    renderSws();
+  }
+}
+
 function renderSws(): void {
   const el = $('#sws'); el.innerHTML = '';
+  if (bridge.mode === 'live' && !runtimeTried && !runtimeLoading) void loadRuntimeFlags();
   S.SW.forEach((s) => {
     const d = document.createElement('div');
-    // live 里这些开关的 on/off 是演示值、面板没读真身：不许拿绿点冒充已开启。
-    d.className = 'sw' + (bridge.mode === 'live' ? ' ro' : (s.on ? ' on' : ''));
-    if (bridge.mode === 'live') d.title = '未接写路径：核内还没有 runtime 旗标 verb（读写都要另立一道门）';
-    d.innerHTML = '<i></i><span>' + esc(s.label) + '</span><span class="key">' + esc(s.key) + '</span>';
-    d.addEventListener('click', () => {
-      if (bridge.mode === 'live') { S.pushLog('WARN', '快捷开关未接：核内没有 runtime 旗标 verb（这次不写配置）'); return; }
-      void bridge.setSwitch(s.key, !s.on);
-      S.toggleSwitch(s.key);
+    const unknown = bridge.mode === 'live' && typeof runtimeFlags[s.key] !== 'boolean';
+    const on = bridge.mode === 'live' ? runtimeFlags[s.key] === true : s.on;
+    const waiting = bridge.mode === 'live' && (runtimeLoading || runtimeBusy === s.key);
+    d.className = 'sw' + (unknown || waiting ? ' ro' : (on ? ' on' : ''));
+    d.dataset.key = s.key;
+    d.dataset.value = unknown ? 'unknown' : String(on);
+    d.setAttribute('role', 'button');
+    d.tabIndex = 0;
+    d.setAttribute('aria-disabled', String(unknown || waiting || (bridge.mode === 'live' && !runtimePresent)));
+    d.setAttribute('aria-pressed', String(on));
+    d.title = bridge.mode !== 'live' ? '演示开关'
+      : unknown ? (runtimePresent ? '配置里没有可识别的布尔值，不猜默认值' : 'settings.json 不在')
+      : waiting ? '正在读取／保存' : '保存 settings.json；下一轮／下一监督进程生效';
+    d.innerHTML = '<i></i><span>' + esc(s.label) + '</span><span class="key">' +
+      (unknown ? '未知' : waiting ? '忙' : on ? '开' : '关') + '</span>';
+    const click = (): void => {
+      if (bridge.mode !== 'live') {
+        void bridge.setSwitch(s.key, !s.on);
+        S.toggleSwitch(s.key);
+      } else if (!runtimePresent || unknown || waiting) {
+        S.pushLog('WARN', s.label + '：当前没有可保存的真实布尔值');
+      } else {
+        void saveRuntimeFlag(s.key);
+      }
+    };
+    d.addEventListener('click', click);
+    d.addEventListener('keydown', (e) => {
+      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); click(); }
     });
     el.appendChild(d);
   });
   if (bridge.mode === 'live') {
     const n = document.createElement('div');
     n.className = 'sw ro';
-    n.innerHTML = '<i></i><span>runtime 开关未接写路径</span><span class="key">read-only</span>';
+    n.innerHTML = '<i></i><span>保存后下一轮生效</span><span class="key">settings.json</span>';
     el.appendChild(n);
   }
 }
@@ -277,7 +366,29 @@ function renderLive(): void {
   setV('#svAge', S.live.age);
   setV('#svAction', S.live.action);
   $('#vframe').classList.toggle('hot', S.live.hot);
-  $('#vcap').textContent = S.live.vcap;
+  const c = S.live.capture;
+  const labels: Record<string, string> = {
+    ready: '实时采集中', dark: '画面偏暗', connecting: '正在连接画面', paused: '实时画面已暂停',
+    missing: '没有可用窗口', minimized: '窗口最小化', offline: '设备画面不可用',
+    failed: '捕获失败', unsupported: '当前环境不支持',
+  };
+  const hasFrame = c.updated > 0;
+  const img = $('#previewImg') as HTMLImageElement;
+  img.hidden = !hasFrame;
+  $('#previewEmpty').hidden = hasFrame;
+  $('#previewTag').textContent = '实时游戏画面 · ' + (c.stale ? '帧已过期' : (labels[c.state] || c.state));
+  const stamp = c.updated ? new Date(c.updated).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
+  $('#previewCap').textContent = c.error || (hasFrame
+    ? (c.source === 'adb' ? 'M9A · ADB 设备画面' : '端游窗口画面') + ' · ' + stamp
+    : (bridge.mode === 'live' ? '等待游戏路读数；不占用前台、不注入操作' : '浏览器演示模式不捕获真实游戏画面'));
+  $('#previewCap').title = $('#previewCap').textContent || '';
+  const btn = $('#previewBtn') as HTMLButtonElement;
+  btn.disabled = bridge.mode !== 'live' || !S.sel;
+  btn.textContent = c.active ? '暂停画面' : '开启画面';
+  btn.classList.toggle('on', c.active);
+  $('#vframe').classList.toggle('capture-error', !!c.error && c.active);
+  $('#vframe').classList.toggle('capture-live', hasFrame && !c.stale && !c.error);
+  $('#vframe').dataset.capture = c.state;
   $('#vcalls').textContent = S.live.vcalls;
 }
 function paintPips(): void {

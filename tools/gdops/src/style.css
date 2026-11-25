@@ -200,9 +200,15 @@ body::after{content:"";position:fixed;inset:0;z-index:91;pointer-events:none;opa
   font-family:var(--font-label);font-size:9px;letter-spacing:1px;padding:2px 7px;cursor:pointer;transition:color .2s,border-color .2s,background .2s}
 .qTog.on{border-color:var(--accent);background:var(--accent-dim);color:var(--accent)}
 .qHint{font-style:normal;font-size:8.5px;line-height:1.6;color:var(--muted);letter-spacing:.3px}
-.qSubActs{display:flex;gap:6px;margin-top:1px}
-.qFoot{position:sticky;bottom:0;z-index:2;margin-top:auto;flex:none;display:flex;gap:6px;padding:7px 0 2px;border-top:1px solid var(--line);
+.qM9aTasks{margin-left:14px;padding:5px 0 5px 8px;gap:2px}
+.qM9aTasks .qRow{padding:4px 5px}
+.qM9aTasks .qName{font-size:10px}
+.qM9aTasks .qMeta{max-width:112px}
+.qM9aTasks .qCk:disabled{opacity:.35;cursor:not-allowed}
+.qFoot{position:sticky;bottom:0;z-index:2;margin-top:auto;flex:none;display:flex;flex-wrap:wrap;gap:6px;padding:7px 0 2px;border-top:1px solid var(--line);
   background:rgba(6,12,22,.94);backdrop-filter:blur(3px)}
+/* 队列操作保持同一行：只收这一条的字距与内边距，不碰全局按钮尺度。 */
+.qFoot .btn.mini{padding:4px 6px;letter-spacing:.35px;white-space:nowrap}
 .qEmpty{font-size:9.5px;line-height:1.7;color:var(--muted);padding:5px 2px;letter-spacing:.5px}
 .qEmpty.warn{color:var(--warn)}
 .arm{border-color:var(--warn) !important;color:var(--warn) !important;background:rgba(255,194,77,.08) !important}
@@ -239,7 +245,15 @@ body::after{content:"";position:fixed;inset:0;z-index:91;pointer-events:none;opa
 .vframe .cross::after{top:50%;left:0;right:0;height:1px}
 .vframe .cap{position:absolute;left:8px;bottom:6px;right:8px;font-family:var(--font-mono);font-size:9px;color:var(--muted);letter-spacing:.5px;
   white-space:nowrap;overflow:hidden;text-overflow:ellipsis}
-.vframe .tag{position:absolute;top:6px;left:8px;font-size:9px;letter-spacing:2px;color:var(--accent)}
+.vframe .tag{position:absolute;top:6px;left:8px;right:92px;font-size:9px;letter-spacing:1px;color:var(--accent);z-index:2;
+  white-space:nowrap;overflow:hidden;text-overflow:ellipsis;pointer-events:none}
+.vframe .preview-btn{position:absolute;top:5px;right:6px;z-index:3;background:rgba(6,14,25,.88)}
+.vframe .preview-btn.on{color:var(--accent);border-color:var(--accent)}
+.vframe #previewImg{position:absolute;inset:0;width:100%;height:100%;object-fit:contain;background:#050a12;z-index:0}
+.vframe #previewEmpty[hidden],.vframe #previewImg[hidden]{display:none}
+.vframe.capture-live{border-color:var(--accent)}
+.vframe.capture-error{border-color:var(--crit)}
+.vframe.capture-error .cap{color:var(--crit);white-space:normal;display:-webkit-box;-webkit-line-clamp:3;-webkit-box-orient:vertical}
 .vframe.hot{border-color:var(--warn);box-shadow:0 0 18px rgba(255,194,77,.25)}
 .supkv{display:flex;flex-direction:column;gap:7px;font-size:10px;min-height:0}
 .supkv .kv{display:flex;justify-content:space-between;gap:8px;border-bottom:1px dashed rgba(53,224,255,.08);padding-bottom:5px}
@@ -351,6 +365,8 @@ body::after{content:"";position:fixed;inset:0;z-index:91;pointer-events:none;opa
   animation:none;
   transform:translateX(-14px);opacity:0;transition:transform .26s var(--ease-out),opacity .18s ease}
 .drPanel.on{transform:none;opacity:1}
+.drPanel.right{left:auto;right:378px;transform:translateX(14px);box-shadow:0 18px 50px rgba(0,0,0,.55),10px 0 30px rgba(0,0,0,.35)}
+.drPanel.right.on{transform:none}
 .drPanel .panel-h .en{min-width:0;overflow:hidden;text-overflow:ellipsis}
 .drX{margin-left:auto;flex:none;width:24px;height:22px;padding:0;border:1px solid var(--line);background:transparent;
   color:var(--muted);font-size:15px;line-height:1;cursor:pointer;transition:color .15s,border-color .15s}
@@ -364,6 +380,8 @@ body::after{content:"";position:fixed;inset:0;z-index:91;pointer-events:none;opa
 .drG h3{display:flex;align-items:baseline;justify-content:space-between;gap:8px;margin:0 0 3px;padding-bottom:4px;
   border-bottom:1px solid var(--line);font-size:9px;font-weight:500;letter-spacing:2.5px;color:var(--accent)}
 .drG h3 small{font-size:8px;font-weight:400;letter-spacing:1px;color:var(--muted)}
+.drG.taskFocus{scroll-margin-top:8px}
+.drG.taskFocus h3{border-bottom-color:var(--accent)}
 .drF{display:grid;grid-template-columns:132px minmax(0,1fr);gap:6px 10px;align-items:start;padding:4px 0;
   border-bottom:1px dashed rgba(53,224,255,.07)}
 .drL{padding-top:5px;font-size:10px;line-height:1.5;color:var(--muted)}
@@ -395,6 +413,21 @@ body::after{content:"";position:fixed;inset:0;z-index:91;pointer-events:none;opa
 .drRm:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
 .drAdd .drSel{border-style:dashed;color:var(--muted)}
 .drAdd .drSel:hover{color:var(--accent);border-color:var(--line-strong)}
+.drStarting{display:flex;flex-direction:column;gap:5px}
+.drSoRow{display:grid;grid-template-columns:42px minmax(0,1fr);gap:6px;align-items:center}
+.drSoRow>span{font-family:var(--font-num);font-size:9px;color:var(--muted)}
+.drSoGrid{display:grid;grid-template-columns:minmax(0,1fr) 112px;gap:5px;min-width:0}
+.drPriority{display:flex;flex-direction:column;gap:3px}
+.drPriRow{display:grid;grid-template-columns:20px 43px minmax(0,1fr);gap:5px;align-items:center}
+.drPriRow>span{font-family:var(--font-num);font-size:9px;color:var(--muted);text-align:right}
+.drPriBtns{display:flex;gap:3px}
+.drPriMove{width:20px;height:23px;padding:0;border:1px solid var(--line);background:transparent;color:var(--muted);
+  font-family:var(--font-num);font-size:11px;line-height:1;cursor:pointer}
+.drPriMove:hover:not(:disabled){color:var(--accent);border-color:var(--accent)}
+.drPriMove:focus-visible{outline:2px solid var(--accent);outline-offset:2px}
+.drPriMove:disabled{opacity:.25;cursor:not-allowed}
+.drPriRow .drSel{padding-top:3px;padding-bottom:3px;font-size:10px}
+.drSel:disabled{opacity:.5;cursor:not-allowed}
 .drRo{padding:4px 0;font-family:var(--font-mono);font-size:10.5px;line-height:1.5;color:var(--text);word-break:break-all}
 .drK{margin-left:6px;padding:0 4px;border:1px solid rgba(255,194,77,.55);font-size:8px;font-weight:400;
   letter-spacing:.5px;color:var(--warn);white-space:nowrap}
@@ -404,7 +437,14 @@ body::after{content:"";position:fixed;inset:0;z-index:91;pointer-events:none;opa
 .drRoomName{font-size:10px;line-height:1.5;color:var(--muted)}
 .drRoomRow .drSel{padding-top:3px;padding-bottom:3px;font-size:10px}
 .drTasks{margin:2px 0 0;padding-left:18px;font-size:10.5px;line-height:1.85;color:var(--text)}
+.m9aOpt{margin-left:calc(var(--depth,0) * 10px)}
+.m9aSub{margin:2px 0 4px 8px;padding-left:8px;border-left:1px solid var(--line)}
 .drNote{margin-top:12px;padding:6px 9px;border-left:2px solid var(--line-strong);font-size:9px;line-height:1.7;color:var(--muted)}
+.settingsDrawer{font-size:11px;line-height:1.8;color:var(--text)}
+.settingsDrawer .sec{margin-top:14px;padding-bottom:4px;border-bottom:1px solid var(--line);color:var(--accent);font-size:9px;letter-spacing:2px}
+.settingsDrawer .sec:first-child{margin-top:2px}
+.settingsDrawer code{font-family:var(--font-mono);font-size:10px;color:var(--accent)}
+.settingsDrawer .mok{color:var(--ok)} .settingsDrawer .mwarn{color:var(--warn)} .settingsDrawer .mcrit{color:var(--crit)} .settingsDrawer .mut{color:var(--muted)}
 .drMsg{min-height:14px;margin-top:10px;font-size:9.5px;line-height:1.6}
 .drMsg.ok{color:var(--ok)}
 .drMsg.bad{color:var(--crit)}
@@ -412,12 +452,14 @@ body::after{content:"";position:fixed;inset:0;z-index:91;pointer-events:none;opa
   background:rgba(6,12,22,.96)}
 .drFootHint{flex:1;min-width:0;font-size:8.5px;line-height:1.5;color:var(--muted)}
 @media (max-width:1180px){
-  /* 窄屏二级框退回右侧整高悬浮层（同样覆盖、不挤列） */
-  .drPanel{position:fixed;top:0;right:0;bottom:0;left:auto;width:min(560px,96vw);z-index:120}
+  /* 两列布局：普通抽屉盖右列，右锚设置抽屉盖左列；各自把触发按钮留在外面。 */
+  .drPanel{position:fixed;top:0;right:14px;bottom:0;left:calc(50vw + 6px);width:auto;z-index:120}
+  .drPanel.right{left:12px;right:calc(50vw + 6px)}
 }
 @media (max-width:760px){
-  .drPanel{width:100vw;left:auto;right:0}
+  .drPanel,.drPanel.right{top:12px;right:12px;bottom:12px;left:12px;width:auto}
   .drF{grid-template-columns:104px minmax(0,1fr)}
+  .drSoGrid{grid-template-columns:minmax(0,1fr)}
 }
 
 /* 助手（MAA / M9A）：宽版模态 + 两块页签 + 计划表单 + 回执 */

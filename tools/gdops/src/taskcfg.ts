@@ -12,14 +12,14 @@
 // 内核每轮会重写的 Fight 字段只读并挂徽标——手改下一轮就被覆盖，不如如实说。
 import { esc } from './util';
 import type { Bridge } from './bridge';
-import type { M9aInst, MaaTask, MaaState, MaaCatalogs } from './types';
+import type { ActResult, M9aCatalogs, M9aInst, M9aOptionDef, M9aOptionNode, MaaTask, MaaState, MaaCatalogs } from './types';
 import { openDrawer, type DrawerHandle } from './drawer';
 import * as S from './state';
 
 type Cfg = Record<string, unknown>;
 type Kind = 'bool' | 'int' | 'enum' | 'list' | 'rooms' | 'ro' | 'single';
 type Enc = 'arr' | ';' | ', ' | ',';
-type Src = 'stages' | 'materials' | 'tags' | 'opers' | 'foldartals' | 'paradigms' | 'items' | 'infrasts' | 'squads' | 'roles' | 'awards';
+type Src = 'stages' | 'materials' | 'tags' | 'opers' | 'foldartals' | 'paradigms' | 'items' | 'infrasts' | 'squads' | 'roles' | 'awards' | 'modes';
 
 interface F {
   k: string;
@@ -80,17 +80,25 @@ const THEME_OPTS: [string, string][] = [
   ['Sami', '萨米'],
   ['Sarkaz', '萨卡兹'],
   ['JieGarden', '界园'],
+  ['BlackFlow', '黑流树海'],
 ];
 
-const MODE_OPTS: [string, string][] = [
+const MODE_BASE: [string, string][] = [
   ['Exp', '刷等级'],
   ['Investment', '刷源石锭'],
   ['Collectible', '刷开局'],
-  ['CLP_PDS', '刷坍缩范式'],
   ['Squad', '刷月度小队'],
   ['Exploration', '刷深入调查'],
-  ['FindPlaytime', '刷常乐节点'],
 ];
+const BLACKFLOW_MODES: [string, string][] = [
+  ['Exp', '刷等级，快速飞三层'],
+  ['Investment', '刷源石锭，投资完成后自动退出'],
+  ['BlackFlowStartRun', '刷开局，刷到目标后退出并保留这一局'],
+];
+const MODE_EXTRA: Record<string, [string, string][]> = {
+  Sami: [['CLP_PDS', '刷坍缩范式']],
+  JieGarden: [['FindPlaytime', '刷常乐节点']],
+};
 
 const DRONE_OPTS: [string, string][] = [
   ['Money', '贸易站-龙门币'],
@@ -102,37 +110,57 @@ const DRONE_OPTS: [string, string][] = [
   ['NotUse', '不使用无人机'],
 ];
 
-const SQUADS: [string, string][] = [
-  '默认分队', '心胜于物分队', '物尽其用分队', '以人为本分队', '永恒狩猎分队', '生活至上分队',
-  '科学主义分队', '特训分队', '魂灵护送分队', '博闻广记分队', '蓝图测绘分队', '因地制宜分队',
-  '异想天开分队', '点刺成锭分队', '拟态学者分队', '专业人士分队', '高台突破分队', '地面突破分队',
-  '游客分队', '司岁台分队', '天师府分队', '花团锦簇分队', '棋行险着分队', '岁影回音分队',
-  '代理人分队', '知学分队', '商贾分队', '特勤分队', '指挥分队', '集群分队', '后勤分队',
-  '矛头分队', '突击战术分队', '堡垒战术分队', '远程战术分队', '破坏战术分队', '研究分队', '高规格分队',
-].map((x) => [x, x] as [string, string]);
+const SQUAD_DEFAULT: Record<string, string[]> = {
+  Phantom: ['集群分队', '矛头分队', '研究分队'],
+  Mizuki: ['集群分队', '矛头分队', '心胜于物分队', '物尽其用分队', '以人为本分队', '研究分队'],
+  Sami: ['集群分队', '矛头分队', '永恒狩猎分队', '生活至上分队', '科学主义分队', '特训分队'],
+  Sarkaz_1: ['集群分队', '矛头分队', '博闻广记分队', '蓝图测绘分队', '点刺成锭分队', '拟态学者分队'],
+  Sarkaz: ['集群分队', '矛头分队', '魂灵护送分队', '博闻广记分队', '蓝图测绘分队', '因地制宜分队', '异想天开分队', '点刺成锭分队', '拟态学者分队', '专业人士分队'],
+  JieGarden: ['特勤分队', '高台突破分队', '地面突破分队', '游客分队', '司岁台分队', '天师府分队', '花团锦簇分队', '棋行险着分队', '岁影回音分队', '代理人分队', '知学分队', '商贾分队'],
+  BlackFlow: ['特勤分队', '矛头分队', '高台突破分队', '地面突破分队', '本源研修分队', '文明开化分队', '开拓者分队', '多边贸易分队', '地质调查分队', '团结阵线分队', '踏足遍历分队'],
+};
+const SQUAD_COMMON = ['指挥分队', '后勤分队', '突击战术分队', '堡垒战术分队', '远程战术分队', '破坏战术分队'];
 
-const ROLES: [string, string][] = [
-  ['默认职业组', '默认职业组'],
+const ROLES_BASE: [string, string][] = [
   ['先手必胜', '先手必胜（先锋、狙击、特种）'],
   ['稳扎稳打', '稳扎稳打（重装、术师、狙击）'],
   ['取长补短', '取长补短（近卫、辅助、医疗）'],
   ['随心所欲', '随心所欲（三张随机）'],
+];
+const ROLES_EXTRA: [string, string][] = [
   ['灵活部署', '灵活部署（先锋、辅助、特种）'],
   ['坚不可摧', '坚不可摧（重装、术师、医疗）'],
 ];
 
 /** RoguelikeCollectibleAward（flags 枚举，配置里存英文名、逗号串）。 */
-const AWARDS: [string, string][] = [
-  ['HotWater', '热水壶'],
-  ['Shield', '盾'],
-  ['Ingot', '锭'],
-  ['Hope', '希望'],
-  ['Random', '随机奖励'],
-  ['Key', '钥匙'],
-  ['Dice', '骰子'],
-  ['Idea', '构想'],
-  ['Ticket', '票券'],
+const AWARDS_BASE: [string, string][] = [
+  ['HotWater', '热水壶'], ['Shield', '盾'], ['Ingot', '锭'], ['Hope', '希望'], ['Random', '随机奖励'],
 ];
+const AWARDS_EXTRA: Record<string, [string, string][]> = {
+  Mizuki: [['Key', '钥匙'], ['Dice', '骰子']],
+  Sarkaz: [['Idea', '构想']],
+  JieGarden: [['Ticket', '票券']],
+};
+
+const BF_REWARDS: [string, string][] = [
+  ['UnnumberedItem', '未编号物'], ['SurveyAdvance', '调查预付款'], ['SpaceLease', '空间租赁'],
+  ['RegressionCompensation', '退行补偿'], ['ForestRide', '林间代步'], ['NestParasitism', '巢寄生'],
+  ['Pegasus', '襁褓天马'], ['Hippogriff', '襁褓骏鹰'], ['Dragon', '襁褓巨龙'],
+  ['Hydra', '襁褓九头蛇'], ['BaiZe', '襁褓白泽'], ['GoldenCrow', '襁褓金乌'],
+];
+const BF_REWARD_ORDER = ['Pegasus', 'SpaceLease', 'ForestRide', 'UnnumberedItem', 'RegressionCompensation', 'SurveyAdvance', 'NestParasitism', 'Hippogriff', 'Dragon', 'Hydra', 'BaiZe', 'GoldenCrow'];
+const BF_ANIMALS: [string, string][] = [
+  ['None', '不要求'], ['Cat', '襁褓中的猫'], ['Dog', '襁褓中的狗'],
+  ['Cerberus', '襁褓三头犬'], ['FeatheredSerpent', '襁褓羽蛇'],
+];
+const BF_CULTIVATION: Record<string, string> = {
+  Cat: '襁褓中的猫', Dog: '襁褓中的狗', Cerberus: '襁褓三头犬', FeatheredSerpent: '襁褓羽蛇',
+};
+
+const FAST_FLIGHT_LOCKED = new Set(['Squad', 'SquadCollectible', 'Roles', 'StartingOpers', 'BlackFlowEnding']);
+function fastFlightLocked(cfg: Cfg): boolean {
+  return cfg.Theme === 'BlackFlow' && cfg.BlackFlowFastFlight === true;
+}
 
 const GENERIC_NUMS = [0, 1, 2, 3, 4, 5, 6, 8, 10, 20, 30, 50, 99, 100, 999];
 const MINUTE_SECS = [60, 120, 180, 240, 300, 360, 420, 480, 540, 600, 720, 780, 900];
@@ -388,7 +416,7 @@ function schema(type: string): G[] {
               nums: [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 2147483647],
               labels: { '-1': '自动', '2147483647': 'MAX（自动）' },
             },
-            { k: 'Mode', label: '刷取策略', kind: 'enum', opts: MODE_OPTS },
+            { k: 'Mode', label: '刷取策略', kind: 'enum', src: 'modes' },
             {
               k: 'StartCount',
               label: '开始探索次数上限',
@@ -396,8 +424,9 @@ function schema(type: string): G[] {
               nums: [1, 2, 3, 5, 10, 20, 50, 100, 999, 9999, 99999],
             },
             { k: 'Squad', label: '开局分队', src: 'squads', allowEmpty: true },
+            { k: 'SquadCollectible', label: '刷开局使用分队', src: 'squads', allowEmpty: true },
             { k: 'Roles', label: '开局职业组', src: 'roles', allowEmpty: true },
-            { k: 'StartingOpers', label: '开局干员', kind: 'list', src: 'opers', enc: 'arr' },
+            { k: 'StartingOpers', label: '开局干员', kind: 'list', hint: '最多三位；每项独立选择干员与是否使用助战' },
             { k: 'UseAdditionalStartingOpers', label: '启用追加开局干员' },
           ],
         },
@@ -431,6 +460,22 @@ function schema(type: string): G[] {
             { k: 'SamiNewSquad2StartingFoldartal', label: '生活队凹开局密文板' },
             { k: 'SamiNewSquad2StartingFoldartals', label: '生活队开局密文板', kind: 'list', src: 'foldartals', enc: ';', max: 3, hint: '最多三个' },
             { k: 'SquadIsFoldartal', label: '分队按密文板处理' },
+          ],
+        },
+        {
+          title: '黑流树海',
+          fields: [
+            { k: 'BlackFlowEnding', label: '目标结局', kind: 'enum', opts: [['Ending1', '一结局 · 强制重启']], hint: '快速飞三层开启时不能选择结局' },
+            { k: 'BlackFlowEnding2', label: '二结局（旧字段）', ro: true },
+            { k: 'BlackFlowEnding3', label: '三结局（旧字段）', ro: true },
+            { k: 'BlackFlowFastFlight', label: '快速飞三层', hint: '开启后锁定分队、职业组、开局干员与结局' },
+            { k: 'BlackFlowStartUtopia', label: '凹第一层实托邦', hint: '需难度 6 及以上' },
+            { k: 'BlackFlowStartAnimal1', label: '襁褓动物 · 第一只', kind: 'enum', opts: BF_ANIMALS },
+            { k: 'BlackFlowStartAnimal2', label: '襁褓动物 · 第二只', kind: 'enum', opts: BF_ANIMALS, hint: '两只不能同时要求襁褓羽蛇' },
+            { k: 'BlackFlowCultivationTarget', label: '培育目标（旧字段）', ro: true },
+            { k: 'BlackFlowStartRewards', label: '期望奖励（任一命中即停）', hint: '羽蛇奖励仅在选择襁褓羽蛇时生效；未生效的勾选会保留' },
+            { k: 'BlackFlowStartRewardPriority', label: '开局奖励选择优先级', hint: '从上到下选择；十二项各一次，用每行上下箭头调序' },
+            { k: 'CoreChar', label: '开局干员（旧字段）', ro: true, hint: '旧 JSON 字段；请使用上方的 StartingOpers' },
           ],
         },
         {
@@ -472,7 +517,9 @@ function schema(type: string): G[] {
 
 /* ── 候选表 ── */
 
-function catOpts(src: Src, c?: MaaCatalogs): [string, string][] {
+function catOpts(src: Src, c?: MaaCatalogs, cfg?: Cfg): [string, string][] {
+  const theme = String(cfg?.Theme || '');
+  const knownTheme = THEME_OPTS.some((x) => x[0] === theme);
   switch (src) {
     case 'stages':
       return (c?.stages ?? []).map((x) => [x, x] as [string, string]);
@@ -492,13 +539,25 @@ function catOpts(src: Src, c?: MaaCatalogs): [string, string][] {
     case 'items':
       return (c?.items ?? []).map((x) => [x, x] as [string, string]);
     case 'infrasts':
-      return (c?.infrasts ?? []).map((x) => [x, x] as [string, string]);
-    case 'squads':
-      return SQUADS;
+      // 值是 MAA 读取的相对路径；标签只露文件名，不把本机绝对路径塞进界面。
+      return (c?.infrasts ?? []).map((x) => [x, x.split(/[\\/]/).pop() || x] as [string, string]);
+    case 'modes':
+      if (!knownTheme) return [];
+      return theme === 'BlackFlow' ? BLACKFLOW_MODES : [...MODE_BASE, ...(MODE_EXTRA[theme] || [])];
+    case 'squads': {
+      const mode = String(cfg?.Mode || '');
+      const baseKey = theme === 'Sarkaz' && mode === 'Investment' ? 'Sarkaz_1' : theme;
+      const names = SQUAD_DEFAULT[baseKey] || [];
+      const all = [...names, ...SQUAD_COMMON, ...(knownTheme && theme !== 'BlackFlow' ? ['高规格分队'] : [])];
+      return all.map((x) => [x, x] as [string, string]);
+    }
     case 'roles':
-      return ROLES;
-    case 'awards':
-      return AWARDS;
+      return [...ROLES_BASE, ...(theme === 'JieGarden' || theme === 'BlackFlow' ? ROLES_EXTRA : [])];
+    case 'awards': {
+      if (!knownTheme) return [];
+      const extra = AWARDS_EXTRA[theme] || [];
+      return theme === 'JieGarden' ? [...AWARDS_BASE.filter((x) => x[0] !== 'Hope'), ...extra] : [...AWARDS_BASE, ...extra];
+    }
     default:
       return [];
   }
@@ -569,20 +628,108 @@ function listBox(vals: string[], opts: [string, string][], enc: Enc, attrs: stri
 function listHtml(task: MaaTask, f: F, cat?: MaaCatalogs): string {
   const enc = f.enc || 'arr';
   const vals = splitVals(task.cfg[f.k], enc);
-  const opts = f.src ? catOpts(f.src, cat) : vals.map((v) => [v, v] as [string, string]);
+  const opts = f.src ? catOpts(f.src, cat, task.cfg) : vals.map((v) => [v, v] as [string, string]);
   const full = f.max !== undefined && vals.length >= f.max;
   const hint = f.hint ? '<i class="drHint">' + esc(f.hint) + '</i>' : '';
   return listBox(vals, opts, enc, ' data-list="' + esc(f.k) + '"', !!f.src && !full) + hint;
+}
+
+type StartingOper = { Name: string; UseSupport?: boolean };
+
+function validStartingOpers(v: unknown): StartingOper[] | null {
+  return startingOpersForEdit(v, false);
+}
+
+// 草稿允许空位，便于主题重绘时保留用户尚未整理完的三行；保存仍按严格规则收口。
+function startingOpersForEdit(v: unknown, allowEmpty: boolean): StartingOper[] | null {
+  if (!Array.isArray(v) || v.length > 3) return null;
+  const out: StartingOper[] = [];
+  for (const item of v) {
+    if (!item || typeof item !== 'object' || Array.isArray(item)) return null;
+    const o = item as Record<string, unknown>;
+    if (typeof o.Name !== 'string' || (!allowEmpty && !o.Name) || (o.UseSupport !== undefined && typeof o.UseSupport !== 'boolean')) return null;
+    if (Object.keys(o).some((k) => k !== 'Name' && k !== 'UseSupport')) return null;
+    out.push({ Name: o.Name, ...(o.UseSupport === undefined ? {} : { UseSupport: o.UseSupport }) });
+  }
+  return out;
+}
+
+function startingHtml(task: MaaTask, cat?: MaaCatalogs): string {
+  const old = startingOpersForEdit(task.cfg.StartingOpers, true);
+  if (!old) return '<div class="drRo">' + esc(fmt(task.cfg.StartingOpers)) + '</div><i class="drHint">对象结构异常，整项只读；请在 MAA 内修复</i>';
+  const theme = String(task.cfg.Theme || '');
+  const names = Array.from(new Set([...(cat?.rogueOpersByTheme?.[theme] || []), ...old.map((x) => x.Name)]))
+    .sort((a, b) => a.localeCompare(b, 'zh-CN'));
+  const opts: [string, string][] = names.map((x) => [x, x] as [string, string]);
+  const locked = fastFlightLocked(task.cfg);
+  const rows = Array.from({ length: 3 }, (_, i) => {
+    const item = old[i] || { Name: '' };
+    const dis = locked ? ' disabled' : '';
+    return '<div class="drSoRow"><span>第 ' + (i + 1) + ' 位</span><div class="drSoGrid">' +
+      selHtml('data-so-name="' + i + '"' + dis, item.Name, [['', '（不使用这位）'], ...opts]) +
+      selHtml('data-so-support="' + i + '"' + dis, item.UseSupport === undefined ? '' : item.UseSupport ? '1' : '0',
+        [['', '助战：沿用原值'], ['1', '使用助战'], ['0', '不使用助战']]) + '</div></div>';
+  }).join('');
+  return '<div class="drStarting" data-special="StartingOpers" data-dirty="0">' + rows + '</div>' +
+    (locked ? '<i class="drHint">快速飞三层开启时锁定</i>' : '<i class="drHint">空名不占位；原值不在候选里的干员仍保留</i>');
+}
+
+function bfRewardsHtml(task: MaaTask): string {
+  const v = task.cfg.BlackFlowStartRewards;
+  if (typeof v !== 'string') return '<div class="drRo">' + esc(fmt(v)) + '</div>';
+  const selected = new Set(splitVals(v, ', '));
+  const serpent = task.cfg.BlackFlowStartAnimal1 === 'FeatheredSerpent' || task.cfg.BlackFlowStartAnimal2 === 'FeatheredSerpent';
+  const opts = BF_REWARDS.map((o, i) => '<option value="' + esc(o[0]) + '"' + (selected.has(o[0]) ? ' selected' : '') +
+    (i >= 6 && !serpent ? ' disabled' : '') + '>' + esc(o[1]) + (i >= 6 && !serpent ? '（需羽蛇）' : '') + '</option>').join('');
+  const unknown = [...selected].filter((x) => x !== 'None' && x !== 'SerpentRewards' && !BF_REWARDS.some((o) => o[0] === x));
+  const extra = unknown.map((x) => '<option disabled selected value="' + esc(x) + '">' + esc(x) + '（现值，未知项）</option>').join('');
+  return '<select multiple class="drSel" size="7" data-special="BlackFlowStartRewards" data-dirty="0" data-bf-rewards="1">' + opts + extra + '</select>' +
+    '<i class="drHint">按住 Ctrl 多选；不选 = None。羽蛇奖励未生效时仍保留勾选</i>';
+}
+
+function bfPriorityHtml(task: MaaTask): string {
+  const v = task.cfg.BlackFlowStartRewardPriority;
+  if (!Array.isArray(v) || v.some((x) => typeof x !== 'string' || !BF_REWARD_ORDER.includes(x))) {
+    return '<div class="drRo">' + esc(fmt(v)) + '</div><i class="drHint">含未知值，顺序项整项只读</i>';
+  }
+  const used = new Set<string>();
+  const values = Array.from({ length: 12 }, (_, i) => {
+    const candidate = String(v[i] || '');
+    if (candidate && !used.has(candidate)) { used.add(candidate); return candidate; }
+    const next = BF_REWARD_ORDER.find((x) => !used.has(x)) || '';
+    used.add(next);
+    return next;
+  });
+  const rows = values.map((value, i) => {
+    const opts = BF_REWARDS.map((o) => {
+      const taken = values.includes(o[0]) && o[0] !== value;
+      return '<option value="' + esc(o[0]) + '"' + (o[0] === value ? ' selected' : '') + (taken ? ' disabled' : '') + '>' + esc(o[1]) + '</option>';
+    }).join('');
+    return '<div class="drPriRow"><span>' + String(i + 1).padStart(2, '0') + '</span>' +
+      '<span class="drPriBtns"><button type="button" class="drPriMove" data-pri-move="-1" data-pri-pos="' + i + '"' + (i === 0 ? ' disabled' : '') +
+      ' aria-label="第 ' + (i + 1) + ' 项上移">↑</button><button type="button" class="drPriMove" data-pri-move="1" data-pri-pos="' + i + '"' + (i === 11 ? ' disabled' : '') +
+      ' aria-label="第 ' + (i + 1) + ' 项下移">↓</button></span>' +
+      '<select class="drSel" data-bf-priority-pos="' + i + '">' + opts + '</select></div>';
+  }).join('');
+  return '<div class="drPriority" data-special="BlackFlowStartRewardPriority" data-dirty="0">' + rows + '</div>';
 }
 
 function inputHtml(task: MaaTask, f: F, cat?: MaaCatalogs): string {
   const v = task.cfg[f.k];
   if (isRo(task, f)) {
     const badge = task.type === 'Fight' && KERNEL_FIGHT.has(f.k) ? '<b class="drK">每轮覆盖</b>' : '';
-    return '<div class="drRo">' + esc(fmt(v)) + badge + '</div>';
+    const shown = f.k === 'BlackFlowCultivationTarget' && typeof v === 'string'
+      ? (BF_CULTIVATION[v] || v) + ' · ' + v : fmt(v);
+    return '<div class="drRo">' + esc(shown) + badge + '</div>';
   }
   const hint = f.hint ? '<i class="drHint">' + esc(f.hint) + '</i>' : '';
   const kind = f.kind || inferKind(v);
+  if (f.k === 'StartingOpers') return startingHtml(task, cat) + hint;
+  if (f.k === 'BlackFlowStartRewards') return bfRewardsHtml(task) + hint;
+  if (f.k === 'BlackFlowStartRewardPriority') return bfPriorityHtml(task) + hint;
+  if (fastFlightLocked(task.cfg) && ['Squad', 'SquadCollectible', 'Roles'].includes(f.k)) {
+    return '<div class="drRo">' + esc(fmt(v)) + '<b class="drK">快速飞三层锁定</b></div>' + hint;
+  }
   if (kind === 'bool') {
     return '<div class="drCtl">' + selHtml('data-fk="' + esc(f.k) + '" data-ft="bool"', v === true ? '1' : '0', [['1', '开'], ['0', '关']]) + '</div>' + hint;
   }
@@ -590,7 +737,18 @@ function inputHtml(task: MaaTask, f: F, cat?: MaaCatalogs): string {
     return '<div class="drCtl">' + selHtml('data-fk="' + esc(f.k) + '" data-ft="int"', String(typeof v === 'number' ? v : 0), intOpts(f, v)) + '</div>' + hint;
   }
   if (kind === 'enum') {
-    return '<div class="drCtl">' + selHtml('data-fk="' + esc(f.k) + '" data-ft="single"', String(v ?? ''), f.opts || []) + '</div>' + hint;
+    const opts = f.src ? catOpts(f.src, cat, task.cfg) : f.opts || [];
+    if (f.k === 'BlackFlowEnding' && fastFlightLocked(task.cfg)) {
+      return '<div class="drRo">' + esc(fmt(v)) + '<b class="drK">快速飞三层锁定</b></div>' + hint;
+    }
+    if (f.k === 'BlackFlowStartAnimal1' || f.k === 'BlackFlowStartAnimal2') {
+      const otherKey = f.k === 'BlackFlowStartAnimal1' ? 'BlackFlowStartAnimal2' : 'BlackFlowStartAnimal1';
+      const opts2 = opts.map((o) => [o[0], task.cfg[otherKey] === 'FeatheredSerpent' && o[0] === 'FeatheredSerpent' ? o[1] + '（另一只已选）' : o[1]] as [string, string]);
+      let html = selHtml('data-fk="' + esc(f.k) + '" data-ft="single" data-animal="1"', String(v ?? 'None'), opts2);
+      if (task.cfg[otherKey] === 'FeatheredSerpent') html = html.replace('<option value="FeatheredSerpent"', '<option disabled value="FeatheredSerpent"');
+      return '<div class="drCtl">' + html + '</div>' + hint;
+    }
+    return '<div class="drCtl">' + selHtml('data-fk="' + esc(f.k) + '" data-ft="single"', String(v ?? ''), opts) + '</div>' + hint;
   }
   if (kind === 'rooms') {
     const rooms = Array.isArray(v) ? v as { Room?: unknown; IsEnabled?: unknown }[] : [];
@@ -608,13 +766,18 @@ function inputHtml(task: MaaTask, f: F, cat?: MaaCatalogs): string {
     return listHtml(task, f, cat);
   }
   // single：有候选表就列候选表；没有就只列现值/空（不编假选项）
-  const opts = f.src ? catOpts(f.src, cat) : [];
+  const opts = f.src ? catOpts(f.src, cat, task.cfg) : [];
+  if (f.k === 'Filename' && typeof v === 'string' && v && !opts.some((o) => o[0] === v)) {
+    // 自定义绝对路径可能是用户隐私；界面只给保留哨兵，不把路径回显到标签。
+    return '<div class="drCtl">' + selHtml('data-fk="Filename" data-ft="single"', '__KEEP__',
+      [['__KEEP__', '当前自定义路径（保留）'], ['', '（空 / 不设置）'], ...opts]) + '</div>' + hint;
+  }
   const withEmpty: [string, string][] = f.allowEmpty ? [['', '（空 / 不设置）'], ...opts] : opts;
   return '<div class="drCtl">' + selHtml('data-fk="' + esc(f.k) + '" data-ft="single"', String(v ?? ''), withEmpty) + '</div>' + hint;
 }
 
 function rowHtml(task: MaaTask, f: F, cat?: MaaCatalogs): string {
-  return '<div class="drF"><span class="drL">' + esc(f.label) + '</span><div class="drV">' + inputHtml(task, f, cat) + '</div></div>';
+  return '<div class="drF" data-cfg-key="' + esc(f.k) + '"><span class="drL">' + esc(f.label) + '</span><div class="drV">' + inputHtml(task, f, cat) + '</div></div>';
 }
 
 /* ── 面板计划源（写 settings，不是 MAA 配置） ── */
@@ -710,11 +873,143 @@ export function openMaaTaskDrawer(task: MaaTask, maa: MaaState, bridge: Bridge, 
     msg.textContent = text;
   };
 
+  // 主题/Mode/快速飞会改变候选与锁定面。重绘前先收当前 DOM 草稿，不能回到 task.cfg 旧快照。
+  let lastDraft: Cfg = JSON.parse(JSON.stringify(task.cfg)) as Cfg;
+  const fieldMap = new Map<string, F>();
+  for (const g of groups) for (const f of g.fields) fieldMap.set(f.k, f);
+  const dirtySpecials = (): Map<string, string> => new Map(Array.from(h.body.querySelectorAll<HTMLElement>('[data-special]'))
+    .map((el) => [el.dataset.special || '', el.dataset.dirty || '0']));
+  const collectDraft = (): Cfg => {
+    const next: Cfg = JSON.parse(JSON.stringify(lastDraft)) as Cfg;
+    for (const el of Array.from(h.body.querySelectorAll<HTMLSelectElement>('[data-fk]'))) {
+      const k = el.dataset.fk || '';
+      if (k === 'Filename' && el.value === '__KEEP__') continue;
+      if (fastFlightLocked(next) && FAST_FLIGHT_LOCKED.has(k)) continue;
+      if (el.dataset.ft === 'bool') next[k] = el.value === '1';
+      else if (el.dataset.ft === 'int') next[k] = Math.trunc(Number(el.value));
+      else next[k] = el.value;
+    }
+    for (const box of Array.from(h.body.querySelectorAll<HTMLElement>('[data-list]'))) {
+      const k = box.dataset.list || '';
+      if (fastFlightLocked(next) && FAST_FLIGHT_LOCKED.has(k)) continue;
+      const enc = (box.dataset.enc as Enc) || 'arr';
+      const vals = Array.from(box.querySelectorAll<HTMLSelectElement>('select[data-lv]')).map((s) => s.value).filter((v) => v !== '');
+      next[k] = enc === 'arr' ? Array.from(new Set(vals)) : Array.from(new Set(vals)).join(enc);
+    }
+    const starting = h.body.querySelector<HTMLElement>('[data-special="StartingOpers"]');
+    if (starting?.dataset.dirty === '1' && !fastFlightLocked(next)) {
+      const items: StartingOper[] = [];
+      for (let i = 0; i < 3; i++) {
+        const name = starting.querySelector<HTMLSelectElement>('[data-so-name="' + i + '"]')?.value || '';
+        const support = starting.querySelector<HTMLSelectElement>('[data-so-support="' + i + '"]')?.value || '';
+        items.push({ Name: name, ...(support === '' ? {} : { UseSupport: support === '1' }) });
+      }
+      next.StartingOpers = items;
+    }
+    const rewards = h.body.querySelector<HTMLElement>('[data-bf-rewards]');
+    if (rewards?.dataset.dirty === '1') {
+      const selected = Array.from(rewards.querySelectorAll<HTMLOptionElement>('option:checked')).map((x) => x.value);
+      next.BlackFlowStartRewards = selected.length ? selected.join(', ') : 'None';
+    }
+    const priority = h.body.querySelector<HTMLElement>('[data-special="BlackFlowStartRewardPriority"]');
+    if (priority?.dataset.dirty === '1') {
+      next.BlackFlowStartRewardPriority = Array.from(priority.querySelectorAll<HTMLSelectElement>('[data-bf-priority-pos]')).map((x) => x.value);
+    }
+    const roomEls = Array.from(h.body.querySelectorAll<HTMLSelectElement>('[data-room]'));
+    if (roomEls.length) {
+      const old = Array.isArray(lastDraft.RoomList) ? lastDraft.RoomList as { Room?: unknown }[] : [];
+      next.RoomList = old.map((r) => {
+        const key = String(r.Room || '');
+        const hit = roomEls.find((el) => el.dataset.room === key);
+        return hit?.value === '0' ? { Room: key, IsEnabled: false } : { Room: key };
+      });
+    }
+    return next;
+  };
+  const rerenderRogue = (keys: string[]): void => {
+    const dirty = dirtySpecials();
+    const prev = lastDraft;
+    const next = collectDraft();
+    const notes: string[] = [];
+    const themeChanged = next.Theme !== prev.Theme;
+    const modeChanged = next.Mode !== prev.Mode;
+    if (themeChanged) {
+      const modes = new Set(catOpts('modes', cat, next).map((x) => x[0]));
+      if (!modes.has(String(next.Mode ?? ''))) {
+        next.Mode = 'Exp';
+        notes.push('新主题不支持原刷取策略，已改为刷等级');
+      }
+      if (next.Theme !== 'BlackFlow') next.BlackFlowFastFlight = false;
+      const roles = new Set(catOpts('roles', cat, next).map((x) => x[0]));
+      if (typeof next.Roles === 'string' && next.Roles && !roles.has(next.Roles)) {
+        next.Roles = '';
+        notes.push('新主题不支持原开局职业组，已清空');
+      }
+      const awards = new Set(catOpts('awards', cat, next).map((x) => x[0]));
+      if (Array.isArray(next.CollectibleStartAwards)) {
+        next.CollectibleStartAwards = next.CollectibleStartAwards.filter((x) => awards.has(String(x)));
+      } else if (typeof next.CollectibleStartAwards === 'string') {
+        next.CollectibleStartAwards = splitVals(next.CollectibleStartAwards, ', ').filter((x) => awards.has(x)).join(', ');
+      }
+    }
+    if (themeChanged || modeChanged) {
+      const squads = new Set(catOpts('squads', cat, next).map((x) => x[0]));
+      for (const k of ['Squad', 'SquadCollectible']) {
+        if (typeof next[k] === 'string' && next[k] && !squads.has(next[k] as string)) {
+          next[k] = '';
+          notes.push((k === 'Squad' ? '开局分队' : '刷开局使用分队') + '在新主题/策略下不可用，已清空');
+        }
+      }
+    }
+    lastDraft = JSON.parse(JSON.stringify(next)) as Cfg;
+    const view = { ...task, cfg: next };
+    for (const key of keys) {
+      const f = fieldMap.get(key);
+      const row = Array.from(h.body.querySelectorAll<HTMLElement>('.drF')).find((el) => el.dataset.cfgKey === key);
+      if (f && row) {
+        const value = row.querySelector('.drV');
+        if (value) value.innerHTML = inputHtml(view, f, cat);
+      }
+    }
+    for (const el of Array.from(h.body.querySelectorAll<HTMLElement>('[data-special]'))) {
+      if (dirty.get(el.dataset.special || '') === '1') el.dataset.dirty = '1';
+    }
+    if (notes.length) say(false, notes.join('；'));
+  };
+
   // 填错后改了格，红边跟着撤掉。
   h.body.addEventListener('input', (e) => (e.target as HTMLElement).classList.remove('bad'));
   h.body.addEventListener('change', (e) => {
     const el = e.target as HTMLElement;
     el.classList.remove('bad');
+    const special = el.closest<HTMLElement>('[data-special]');
+    if (special) special.dataset.dirty = '1';
+    if (el.dataset.animal !== undefined) {
+      const otherKey = el.dataset.fk === 'BlackFlowStartAnimal1' ? 'BlackFlowStartAnimal2' : 'BlackFlowStartAnimal1';
+      const other = h.body.querySelector<HTMLSelectElement>('[data-fk="' + otherKey + '"]');
+      if (other) for (const op of Array.from(other.options)) {
+        if (op.value === 'FeatheredSerpent') op.disabled = (el as HTMLSelectElement).value === 'FeatheredSerpent';
+      }
+      const serpent = (el as HTMLSelectElement).value === 'FeatheredSerpent' || other?.value === 'FeatheredSerpent';
+      for (const box of Array.from(h.body.querySelectorAll<HTMLElement>('[data-bf-rewards]'))) {
+        const opts = Array.from(box.querySelectorAll<HTMLOptionElement>('option'));
+        opts.forEach((op, i) => { if (i >= 6 && i < 18) op.disabled = !serpent; });
+      }
+    }
+    if (el.dataset.bfPriorityPos !== undefined) {
+      const selects = Array.from(h.body.querySelectorAll<HTMLSelectElement>('[data-bf-priority-pos]'));
+      const values = selects.map((x) => x.value);
+      for (const select of selects) {
+        for (const op of Array.from(select.options)) op.disabled = values.includes(op.value) && op.value !== select.value;
+      }
+    }
+    if (el.dataset.fk === 'Theme') {
+      rerenderRogue(['Mode', 'Squad', 'SquadCollectible', 'Roles', 'StartingOpers', 'CollectibleStartAwards', 'BlackFlowFastFlight', 'BlackFlowEnding']);
+    } else if (el.dataset.fk === 'Mode') {
+      rerenderRogue(['Squad', 'SquadCollectible']);
+    } else if (el.dataset.fk === 'BlackFlowFastFlight') {
+      rerenderRogue(['Squad', 'SquadCollectible', 'Roles', 'StartingOpers', 'BlackFlowEnding']);
+    }
     if (!(el instanceof HTMLSelectElement) || el.dataset.ladd === undefined || !el.value) return;
     // 「＋ 添加一项」：选中即落成一条新的值行，并把自己复位
     const wrap = el.closest('[data-list]') as HTMLElement | null;
@@ -752,6 +1047,21 @@ export function openMaaTaskDrawer(task: MaaTask, maa: MaaState, bridge: Bridge, 
     if (!t) return;
     if (t.dataset.lrm !== undefined) {
       t.closest('.drLi')?.remove();
+      return;
+    }
+    if (t.dataset.priMove !== undefined && t.dataset.priPos !== undefined) {
+      const root = t.closest<HTMLElement>('[data-special="BlackFlowStartRewardPriority"]');
+      const selects = Array.from(root?.querySelectorAll<HTMLSelectElement>('[data-bf-priority-pos]') || []);
+      const pos = Number(t.dataset.priPos);
+      const to = pos + Number(t.dataset.priMove);
+      if (!selects.length || !selects[pos] || !selects[to]) return;
+      const values = selects.map((x) => x.value);
+      [values[pos], values[to]] = [values[to], values[pos]];
+      selects.forEach((select, i) => {
+        select.value = values[i];
+        for (const op of Array.from(select.options)) op.disabled = values.includes(op.value) && op.value !== select.value;
+      });
+      root!.dataset.dirty = '1';
     }
   });
 
@@ -771,6 +1081,11 @@ async function save(
 ): Promise<void> {
   const btn = h.foot.querySelector('[data-save]') as HTMLButtonElement;
   if (btn.disabled) return;
+
+  const theme = h.body.querySelector<HTMLSelectElement>('[data-fk="Theme"]')?.value ?? task.cfg.Theme;
+  const fast = h.body.querySelector<HTMLSelectElement>('[data-fk="BlackFlowFastFlight"]')?.value;
+  const fastFlight = fast === undefined ? task.cfg.BlackFlowFastFlight === true : fast === '1';
+  const locked = theme === 'BlackFlow' && fastFlight ? FAST_FLIGHT_LOCKED : new Set<string>();
 
   const edits: Edit[] = [];
   for (const el of Array.from(h.body.querySelectorAll<HTMLSelectElement>('[data-sk]'))) {
@@ -800,17 +1115,18 @@ async function save(
   }
 
   const patch: Cfg = {};
-  let bad = false;
   for (const el of Array.from(h.body.querySelectorAll<HTMLSelectElement>('[data-fk]'))) {
     const k = el.dataset.fk || '';
     if (KERNEL_FIGHT.has(k) && task.type === 'Fight') continue;
+    if (locked.has(k)) continue;
+    if (k === 'Filename' && el.value === '__KEEP__') continue;
     const ft = el.dataset.ft;
     let val: unknown;
     if (ft === 'bool') {
       val = el.value === '1';
     } else if (ft === 'int') {
       const n = Number(el.value);
-      if (!Number.isFinite(n)) { el.classList.add('bad'); bad = true; continue; }
+      if (!Number.isFinite(n)) { el.classList.add('bad'); say(false, k + '：要整数'); return; }
       val = Math.trunc(n);
     } else {
       val = el.value;
@@ -823,6 +1139,7 @@ async function save(
   for (const box of Array.from(h.body.querySelectorAll<HTMLElement>('[data-list]'))) {
     const k = box.dataset.list || '';
     if (KERNEL_FIGHT.has(k) && task.type === 'Fight') continue;
+    if (locked.has(k)) continue;
     const enc = (box.dataset.enc as Enc) || 'arr';
     const vals = Array.from(box.querySelectorAll<HTMLSelectElement>('select[data-lv]'))
       .map((s) => s.value).filter((v) => v !== '');
@@ -833,6 +1150,54 @@ async function save(
     } else {
       const before = typeof task.cfg[k] === 'string' ? String(task.cfg[k]) : splitVals(task.cfg[k], enc).join(enc);
       if (now.join(enc) !== before) patch[k] = now.join(enc);
+    }
+  }
+
+  // 黑流两只动物互斥；快速飞三层锁住的控件不会进 DOM，因此不会误写。
+  const a1 = h.body.querySelector<HTMLSelectElement>('[data-fk="BlackFlowStartAnimal1"]');
+  const a2 = h.body.querySelector<HTMLSelectElement>('[data-fk="BlackFlowStartAnimal2"]');
+  if (a1 && a2 && a1.value === 'FeatheredSerpent' && a2.value === 'FeatheredSerpent') {
+    a2.classList.add('bad');
+    say(false, '两只襁褓动物不能同时选择襁褓羽蛇');
+    return;
+  }
+
+  // 专用对象/Flags/有序数组：只有用户真正动过才收，避免打开抽屉就规范化旧配置。
+  const starting = h.body.querySelector<HTMLElement>('[data-special="StartingOpers"]');
+  if (!locked.has('StartingOpers') && starting?.dataset.dirty === '1') {
+    const items: StartingOper[] = [];
+    let emptySeen = false;
+    for (let i = 0; i < 3; i++) {
+      const name = starting.querySelector<HTMLSelectElement>('[data-so-name="' + i + '"]')?.value || '';
+      const support = starting.querySelector<HTMLSelectElement>('[data-so-support="' + i + '"]')?.value || '';
+      if (!name) { emptySeen = true; continue; }
+      if (emptySeen) { say(false, 'StartingOpers：空位后面的干员不会生效，请把干员移到前面'); return; }
+      if (items.some((x) => x.Name === name)) { say(false, 'StartingOpers：同一位干员只能选一次'); return; }
+      items.push({ Name: name, ...(support === '' ? {} : { UseSupport: support === '1' }) });
+    }
+    if (JSON.stringify(items) !== JSON.stringify(validStartingOpers(task.cfg.StartingOpers))) patch.StartingOpers = items;
+  }
+
+  const rewards = h.body.querySelector<HTMLElement>('[data-bf-rewards]');
+  if (rewards?.dataset.dirty === '1') {
+    const selected = Array.from(rewards.querySelectorAll<HTMLOptionElement>('option:checked')).map((x) => x.value);
+    if (selected.some((x) => !BF_REWARDS.some((o) => o[0] === x))) {
+      say(false, '期望奖励含未知值；请先在 MAA 内清理，面板不猜它的含义');
+      return;
+    } else {
+      const value = selected.length ? selected.join(', ') : 'None';
+      if (value !== task.cfg.BlackFlowStartRewards) patch.BlackFlowStartRewards = value;
+    }
+  }
+
+  const priority = h.body.querySelector<HTMLElement>('[data-special="BlackFlowStartRewardPriority"]');
+  if (priority?.dataset.dirty === '1') {
+    const values = Array.from(priority.querySelectorAll<HTMLSelectElement>('[data-bf-priority-pos]')).map((x) => x.value);
+    if (values.length !== 12 || new Set(values).size !== 12 || values.some((x) => !BF_REWARD_ORDER.includes(x))) {
+      say(false, '开局奖励优先级必须十二项各一次');
+      return;
+    } else if (JSON.stringify(values) !== JSON.stringify(task.cfg.BlackFlowStartRewardPriority)) {
+      patch.BlackFlowStartRewardPriority = values;
     }
   }
 
@@ -849,7 +1214,6 @@ async function save(
     if (JSON.stringify(rooms) !== JSON.stringify(old)) patch.RoomList = rooms;
   }
 
-  if (bad) { say(false, '有数字格的值不是整数，先改好再保存'); return; }
   if (!edits.length && !Object.keys(patch).length) { say(true, '跟原来一样，没有写盘'); return; }
 
   btn.disabled = true;
@@ -881,32 +1245,443 @@ async function save(
   after();
 }
 
-/* ── M9A 实例：只读详情框 ── */
+/* ── M9A 实例：全下拉配置框 ── */
 
-export function openM9aDrawer(inst: M9aInst, isCur: boolean, bridge: Bridge, after: () => void): void {
-  const tasks = inst.allTasks && inst.allTasks.length ? inst.allTasks : inst.tasks;
-  const rows = [
+type M9aSource = 'task' | 'resource' | 'controller' | 'global';
+export interface M9aQueueTask { key: string; name: string; entry: string }
+interface M9aQueueDraft {
+  source: string;
+  observed: string;
+  queue: M9aQueueTask[];
+  dirty: boolean;
+  saved: boolean;
+}
+const m9aQueueDrafts = new Map<string, M9aQueueDraft>();
+const m9aQueueSaves = new Set<string>();
+interface M9aOptionEdit {
+  source: M9aSource;
+  task?: number;
+  path: string[];
+  selected_case?: string;
+  selected_cases?: string[];
+}
+
+function cloneNodes(nodes?: M9aOptionNode[]): M9aOptionNode[] {
+  return nodes ? JSON.parse(JSON.stringify(nodes)) as M9aOptionNode[] : [];
+}
+
+export function parseM9aHistory(key: string): M9aQueueTask | null {
+  if (key.includes('<|||>')) {
+    if (key.split('<|||>').length !== 2) return null;
+    const [name, entry] = key.split('<|||>');
+    return name && entry ? { key, name, entry } : null;
+  }
+  if (key.includes('<') || key.split(':').length !== 2) return null;
+  const [name, entry] = key.split(':');
+  return name && entry ? { key, name, entry } : null;
+}
+
+/** 任务身份只认名称与入口：旧 `名称:entry` 与目录的 `名称<|||>entry` 必须视作同一项。 */
+export function m9aQueueIdentity(task: Pick<M9aQueueTask, 'name' | 'entry'>): string {
+  return task.name + '<|||>' + task.entry;
+}
+
+function m9aQueueSource(inst: M9aInst): string {
+  return JSON.stringify(inst.currentTasks ?? inst.allTasks ?? inst.tasks ?? []);
+}
+
+function m9aInitialQueue(inst: M9aInst): M9aQueueTask[] {
+  return (inst.currentTasks ?? inst.allTasks ?? inst.tasks ?? []).map((key) => {
+    const parsed = parseM9aHistory(key);
+    if (parsed) return parsed;
+    return { key, name: key, entry: '' };
+  });
+}
+
+function m9aQueueDraft(inst: M9aInst): M9aQueueDraft {
+  const source = m9aQueueSource(inst);
+  let draft = m9aQueueDrafts.get(inst.id);
+  if (!draft) {
+    draft = { source, observed: source, queue: m9aInitialQueue(inst), dirty: false, saved: false };
+    m9aQueueDrafts.set(inst.id, draft);
+    return draft;
+  }
+  if (source === draft.source) {
+    draft.observed = source;
+    draft.saved = false;
+  } else if (draft.saved && source === draft.observed) {
+    // 保存成功但 reload 还没回来：旧 inst 对象不能把刚保存的队列回退掉。
+  } else if (!draft.dirty) {
+    draft = { source, observed: source, queue: m9aInitialQueue(inst), dirty: false, saved: false };
+    m9aQueueDrafts.set(inst.id, draft);
+  } else {
+    draft.observed = source;
+  }
+  return draft;
+}
+
+export function m9aQueueFor(inst: M9aInst): M9aQueueTask[] {
+  return m9aQueueDraft(inst).queue;
+}
+
+export function m9aQueueIsDirty(inst: M9aInst): boolean {
+  return m9aQueueDraft(inst).dirty;
+}
+
+export function m9aQueueSet(inst: M9aInst, queue: M9aQueueTask[]): void {
+  const draft = m9aQueueDraft(inst);
+  draft.queue = queue.map((t) => ({ ...t }));
+  draft.dirty = JSON.stringify(draft.queue.map((t) => t.key)) !== draft.source;
+  draft.saved = false;
+}
+
+/** 纯函数收口勾选语义：按身份防陈旧下标错删，按身份防旧新格式重复追加。 */
+export function m9aQueueToggle(queue: M9aQueueTask[], key: string, index: number): M9aQueueTask[] | null {
+  const next = queue.map((t) => ({ ...t }));
+  if (index >= 0) {
+    if (!Number.isInteger(index) || index >= next.length || m9aQueueIdentity(next[index]) !== key) return null;
+    next.splice(index, 1);
+    return next;
+  }
+  const task = parseM9aHistory(key);
+  if (!task || next.some((t) => m9aQueueIdentity(t) === key)) return null;
+  next.push(task);
+  return next;
+}
+
+export function m9aQueueCommit(inst: M9aInst, keys?: string[]): void {
+  const draft = m9aQueueDrafts.get(inst.id);
+  if (!draft) return;
+  // 只把已落盘快照立为新基线；保存请求在途时的新编辑必须留在草稿里，不能被旧快照覆盖。
+  draft.source = JSON.stringify(keys || draft.queue.map((t) => t.key));
+  draft.dirty = JSON.stringify(draft.queue.map((t) => t.key)) !== draft.source;
+  draft.saved = !draft.dirty;
+}
+
+export function m9aQueueSaveInFlight(inst: M9aInst): boolean {
+  return m9aQueueSaves.has(inst.id);
+}
+
+export function m9aQueueSaveBegin(inst: M9aInst): boolean {
+  if (m9aQueueSaves.has(inst.id)) return false;
+  m9aQueueSaves.add(inst.id);
+  return true;
+}
+
+export function m9aQueueSaveEnd(inst: M9aInst): void {
+  m9aQueueSaves.delete(inst.id);
+}
+
+export async function saveM9aQueueDraft(inst: M9aInst, bridge: Bridge): Promise<ActResult> {
+  const draft = m9aQueueDraft(inst);
+  if (!draft.dirty) return { ok: true, note: '任务队列没有改动' };
+  if (!m9aQueueSaveBegin(inst)) return { ok: false, error: '这个实例正在保存，请等上一笔完成' };
+  try {
+    const currentTasks = draft.queue.map((t) => t.key);
+    if (currentTasks.some((key) => !parseM9aHistory(key))) {
+      return { ok: false, error: '队列里有无法识别的旧任务格式，请先移除该项再保存' };
+    }
+    const r = await bridge.assistM9aSaveInstance(inst.id, inst.name, { name: inst.name, currentTasks });
+    if (r.ok) m9aQueueCommit(inst, currentTasks);
+    return r;
+  } finally {
+    m9aQueueSaveEnd(inst);
+  }
+}
+
+function m9aNode(nodes: M9aOptionNode[], name: string): M9aOptionNode | undefined {
+  return nodes.find((n) => n.name === name);
+}
+
+function m9aOne(def: M9aOptionDef, node?: M9aOptionNode): string {
+  const cases = def.cases || [];
+  if (node?.selected_case && cases.some((c) => c.name === node.selected_case)) return node.selected_case;
+  if (typeof node?.index === 'number' && cases[node.index]) return cases[node.index].name;
+  if (typeof def.defaultCase === 'string' && cases.some((c) => c.name === def.defaultCase)) return def.defaultCase;
+  return cases[0]?.name || '';
+}
+
+function m9aMany(def: M9aOptionDef, node?: M9aOptionNode): string[] {
+  const valid = new Set((def.cases || []).map((c) => c.name));
+  const saved = (node?.selected_cases || []).filter((x) => valid.has(x));
+  if (node?.selected_cases !== undefined) return saved;
+  if (Array.isArray(def.defaultCase)) return def.defaultCase.filter((x) => valid.has(x));
+  return [];
+}
+
+function m9aChildren(def: M9aOptionDef, node?: M9aOptionNode): string[] {
+  const selected = def.type === 'checkbox' ? m9aMany(def, node) : [m9aOne(def, node)];
+  return selected.flatMap((name) => (def.cases || []).find((c) => c.name === name)?.options || []);
+}
+
+function m9aTaskDef(cat: M9aCatalogs, task: M9aQueueTask): M9aOptionDef[] | null {
+  const def = cat.tasks.find((t) => t.name === task.name && t.entry === task.entry);
+  return def ? def.options : null;
+}
+
+function m9aSetNode(nodes: M9aOptionNode[], path: string[], value: Partial<M9aOptionNode>): void {
+  let arr = nodes;
+  for (let i = 0; i < path.length; i++) {
+    const name = path[i];
+    let node = arr.find((n) => n.name === name);
+    if (!node) { node = { name }; arr.push(node); }
+    if (i + 1 === path.length) {
+      delete node.selected_case;
+      delete node.selected_cases;
+      delete node.index;
+      Object.assign(node, value);
+      return;
+    }
+    if (!node.sub_options) node.sub_options = [];
+    arr = node.sub_options;
+  }
+}
+
+function m9aOptAttrs(source: M9aSource, path: string[], task?: string): string {
+  return ' data-m9a-opt="1" data-src="' + source + '"' + (task === undefined ? '' : ' data-task="' + esc(task) + '"') +
+    ' data-path="' + esc(JSON.stringify(path)) + '"';
+}
+
+function m9aInputHtml(def: M9aOptionDef, node?: M9aOptionNode): string {
+  const vals = (def.inputs || []).map((input) => input.password
+    ? esc(input.label || input.name) + '：<span class="drRo">密码字段不展示</span>'
+    : esc(input.label || input.name) + '：' + esc(node?.data?.[input.name] ?? input.default ?? '（空）'));
+  return '<div class="drRo">' + (vals.join('<br>') || '只读字段') + '</div><i class="drHint">自由输入只读；需要时请在 M9A 内修改</i>';
+}
+
+function m9aRootDefs(defs: M9aOptionDef[]): M9aOptionDef[] {
+  // 目录是 DFS 前序：只在「被更早父项引用」时判为子项，后代的回环引用不能把根项抹掉。
+  const children = new Set<string>();
+  return defs.filter((d) => {
+    const root = !children.has(d.name);
+    for (const c of d.cases || []) for (const name of c.options || []) children.add(name);
+    return root;
+  });
+}
+
+function m9aPlainText(text?: string): string {
+  return (text || '').replace(/<br\s*\/?>/gi, ' ').replace(/<[^>]+>/g, '').replace(/\s+/g, ' ').trim();
+}
+
+function m9aOptionsHtml(
+  defs: M9aOptionDef[],
+  nodes: M9aOptionNode[],
+  allDefs: M9aOptionDef[],
+  source: M9aSource,
+  task: string | undefined,
+  prefix: string[] = [],
+  depth = 0,
+  filterRoots = true,
+): string {
+  return (filterRoots ? m9aRootDefs(defs) : defs).map((def) => {
+    const node = m9aNode(nodes, def.name);
+    const path = [...prefix, def.name];
+    const attrs = m9aOptAttrs(source, path, task);
+    let value: string;
+    if (def.type === 'switch' || def.type === 'select') {
+      const opts: [string, string][] = (def.cases || []).map((c) => [c.name, c.label || c.name]);
+      value = opts.length ? selHtml(attrs, m9aOne(def, node), opts) : '<div class="drRo">（目录没给候选）</div>';
+    } else if (def.type === 'checkbox') {
+      const cases = def.cases || [];
+      const selected = new Set(m9aMany(def, node));
+      value = cases.length
+        ? '<select multiple class="drSel"' + attrs + ' size="' + Math.min(5, Math.max(2, cases.length)) + '">' +
+          cases.map((c) => '<option value="' + esc(c.name) + '"' + (selected.has(c.name) ? ' selected' : '') + '>' + esc(c.label || c.name) + '</option>').join('') +
+          '</select><i class="drHint">按住 Ctrl 可多选；不选 = 全部关闭</i>'
+        : '<div class="drRo">（目录没给候选）</div>';
+    } else value = m9aInputHtml(def, node);
+    const children = m9aChildren(def, node);
+    const childDefs = allDefs.filter((d) => children.includes(d.name) && !path.includes(d.name));
+    const sub = childDefs.length
+      ? '<div class="m9aSub">' + m9aOptionsHtml(childDefs, node?.sub_options || [], allDefs, source, task, path, depth + 1, false) + '</div>'
+      : '';
+    const label = def.label || def.name;
+    const description = m9aPlainText(def.description);
+    const title = description ? ' title="' + esc(description) + '"' : '';
+    return '<div class="m9aOpt" style="--depth:' + depth + '"><div class="drF"><span class="drL"' + title + '>' + esc(label) + '</span><div class="drV">' + value + '</div></div>' + sub + '</div>';
+  }).join('');
+}
+
+function collectM9aEdits(
+  defs: M9aOptionDef[],
+  nodes: M9aOptionNode[],
+  base: M9aOptionNode[],
+  source: M9aSource,
+  task: number | undefined,
+  out: M9aOptionEdit[],
+  prefix: string[] = [],
+  allDefs: M9aOptionDef[] = defs,
+  filterRoots = true,
+): void {
+  for (const def of filterRoots ? m9aRootDefs(defs) : defs) {
+    const path = [...prefix, def.name];
+    const node = m9aNode(nodes, def.name);
+    const old = m9aNode(base, def.name);
+    if (def.type === 'switch' || def.type === 'select') {
+      const now = m9aOne(def, node);
+      if (now && now !== m9aOne(def, old)) out.push({ source, task, path, selected_case: now });
+    } else if (def.type === 'checkbox') {
+      const now = m9aMany(def, node).slice().sort();
+      const before = m9aMany(def, old).slice().sort();
+      if (JSON.stringify(now) !== JSON.stringify(before)) out.push({ source, task, path, selected_cases: now });
+    }
+    const children = m9aChildren(def, node);
+    const childDefs = allDefs.filter((d) => children.includes(d.name) && !path.includes(d.name));
+    if (childDefs.length) collectM9aEdits(childDefs, node?.sub_options || [], old?.sub_options || [], source, task, out, path, allDefs, false);
+  }
+}
+
+export function openM9aDrawer(inst: M9aInst, isCur: boolean, bridge: Bridge, after: () => void, catalogs?: M9aCatalogs, focusKey?: string): void {
+  const key = 'm9a:' + inst.id + (focusKey ? ':task:' + focusKey : '');
+  const readOnlyRows = [
     ['实例 ID', inst.id],
-    ['资源', inst.resource || '—'],
-    ['控制器', inst.controller || '—'],
-    ['预设', inst.preset || '—'],
+    ['实例名', inst.name || '—'],
     ['ADB', (inst.adbSerial || '—') + (inst.adbName ? '（' + inst.adbName + '）' : '')],
   ].map(([k, v]) => '<div class="drF"><span class="drL">' + esc(k) + '</span><div class="drV"><div class="drRo">' + esc(v) + '</div></div></div>').join('');
+  if (!catalogs) {
+    const h = openDrawer(inst.name || inst.id, 'M9A · 实例配置',
+      '<section class="drG"><h3>连接</h3>' + readOnlyRows + '</section><div class="drNote">M9A 候选目录没读回来：刷新后再开齿轮。</div>',
+      '<button type="button" class="btn mini" data-cancel="1">关闭</button>', key);
+    (h.foot.querySelector('[data-cancel]') as HTMLElement).addEventListener('click', () => h.close());
+    return;
+  }
 
-  const list = tasks.length
-    ? '<ol class="drTasks">' + tasks.map((t) => '<li>' + esc(t) + '</li>').join('') + '</ol>'
-    : '<div class="drRo">（没有任务）</div>';
+  const cat = catalogs;
+  const queueNow = (): M9aQueueTask[] => m9aQueueFor(inst);
+  let resource = inst.resource || '';
+  let controller = inst.controller || '';
+  let preset = inst.preset || '';
+  let busy = false;
+  let didFocusTask = false;
+  const taskNodes = new Map<string, M9aOptionNode[]>();
+  const baseScopedNodes: Record<'resource' | 'controller', Map<string, M9aOptionNode[]>> = {
+    resource: new Map(), controller: new Map(),
+  };
+  const scopedNodes: Record<'resource' | 'controller', Map<string, M9aOptionNode[]>> = {
+    resource: new Map(), controller: new Map(),
+  };
+  if (inst.resource) baseScopedNodes.resource.set(inst.resource, cloneNodes(inst.resourceOptions));
+  if (inst.controller) baseScopedNodes.controller.set(inst.controller, cloneNodes(inst.controllerOptions));
+  let globalNodes = cloneNodes(inst.globalOptions);
+  const baseTaskNodes = new Map<string, M9aOptionNode[]>();
+  for (const item of inst.taskItems || []) baseTaskNodes.set(item.name, cloneNodes(item.option));
 
-  const h = openDrawer(
-    inst.name || inst.id,
-    'M9A · ' + inst.taskCount + ' 个任务 · 实例现状（只读）',
-    '<section class="drG"><h3>连接</h3>' + rows + '</section>' +
-    '<section class="drG"><h3>任务表</h3>' + list + '</section>' +
-    '<div class="drNote">实例文件的编辑通道未接：任务增删仍在 M9A 里做；切到这一台走 <code>apply-m9a-instance</code>（面板已有该通道）。</div>',
-    (isCur ? '' : '<button type="button" class="btn mini" data-sw="1" data-cf="再点一次：切到这台">切到这台</button>') +
-    '<button type="button" class="btn mini" data-cancel="1">关闭</button>',
-    'm9a:' + inst.id,
-  );
+  const h = openDrawer(inst.name || inst.id, 'M9A · 实例配置 · 全下拉',
+    '', '<button type="button" class="btn mini" data-sw="1" data-cf="再点一次：切到这台">切到这台</button>' +
+    '<button type="button" class="btn mini primary" data-save="1">保存</button>' +
+    '<button type="button" class="btn mini" data-cancel="1">关闭</button>', key);
+
+  function nodesForTask(name: string): M9aOptionNode[] {
+    let nodes = taskNodes.get(name);
+    if (!nodes) { nodes = cloneNodes(baseTaskNodes.get(name)); taskNodes.set(name, nodes); }
+    return nodes;
+  }
+
+  function nodesForScoped(source: 'resource' | 'controller', scope: string): M9aOptionNode[] {
+    let nodes = scopedNodes[source].get(scope);
+    if (!nodes) { nodes = cloneNodes(baseScopedNodes[source].get(scope)); scopedNodes[source].set(scope, nodes); }
+    return nodes;
+  }
+
+  function compatible(): boolean {
+    const r = cat.resources.find((x) => x.name === resource);
+    return !r || !r.controllers.length || r.controllers.some((x) => x.toLowerCase() === controller.toLowerCase());
+  }
+
+  function bodyHtml(): string {
+    const queue = queueNow();
+    const rootRows =
+      '<div class="drF"><span class="drL">资源</span><div class="drV">' + selHtml('data-root="resource"', resource, cat.resources.map((r) => [r.name, r.name] as [string, string])) + '</div></div>' +
+      '<div class="drF"><span class="drL">控制器</span><div class="drV">' + selHtml('data-root="controller"', controller, cat.controllers.map((c) => [c, c] as [string, string])) + '</div></div>' +
+      '<div class="drF"><span class="drL">预设</span><div class="drV">' + selHtml('data-root="preset"', preset, [['', '（不使用预设）'], ...cat.presets.map((p) => [p.name, p.name] as [string, string])], '（不使用预设）') + '</div></div>';
+    const optionGroups = queue.map((t) => {
+      const defs = m9aTaskDef(cat, t);
+      const focusClass = t.key === focusKey ? ' taskFocus' : '';
+      const attrs = ' class="drG' + focusClass + '" data-m9a-task-section="' + esc(t.key) + '"';
+      if (!defs) return '<section' + attrs + '><h3>' + esc(t.name) + '<small>目录里没有对应定义</small></h3><div class="drNote">旧任务只保留队列身份；选项不可编辑。</div></section>';
+      if (!defs.length) return '<section' + attrs + '><h3>' + esc(t.name) + '<small>' + esc(t.entry) + '</small></h3><div class="drNote">这个任务没有可编辑选项。</div></section>';
+      return '<section' + attrs + '><h3>' + esc(t.name) + '<small>' + esc(t.entry) + '</small></h3>' +
+        m9aOptionsHtml(defs, nodesForTask(t.name), defs, 'task', t.key) + '</section>';
+    }).join('');
+    const resourceDefs = cat.resourceOptions[resource] || [];
+    const controllerDefs = cat.controllerOptions[controller] || [];
+    const extraOptions =
+      (resourceDefs.length ? '<section class="drG"><h3>资源选项<small>' + esc(resource) + '</small></h3>' + m9aOptionsHtml(resourceDefs, nodesForScoped('resource', resource), resourceDefs, 'resource', undefined) + '</section>' : '') +
+      (controllerDefs.length ? '<section class="drG"><h3>控制器选项<small>' + esc(controller) + '</small></h3>' + m9aOptionsHtml(controllerDefs, nodesForScoped('controller', controller), controllerDefs, 'controller', undefined) + '</section>' : '') +
+      (cat.globalOptions.length ? '<section class="drG"><h3>全局选项</h3>' + m9aOptionsHtml(cat.globalOptions, globalNodes, cat.globalOptions, 'global', undefined) + '</section>' : '');
+    return '<section class="drG"><h3>连接</h3>' + readOnlyRows + '</section>' +
+      '<section class="drG"><h3>实例设置</h3>' + rootRows + '</section>' +
+      optionGroups + extraOptions +
+      '<div class="drNote">保存会原位改写并先备份；M9A 正在运行时拒写。任务勾选与增删在左侧「02 任务队列」的次级栏里操作，不调整顺序。自由输入与密码字段只读。</div>' +
+      (compatible() ? '' : '<div class="drMsg bad">当前资源不支持这个控制器，请改选兼容组合。</div>');
+  }
+
+  function render(focusEl?: HTMLElement): void {
+    const focus = focusEl?.dataset.m9aOpt !== undefined
+      ? { kind: 'opt' as const, src: focusEl.dataset.src, task: focusEl.dataset.task, path: focusEl.dataset.path }
+      : focusEl?.dataset.root ? { kind: 'root' as const, root: focusEl.dataset.root } : null;
+    const top = h.body.scrollTop;
+    h.body.innerHTML = bodyHtml();
+    h.body.scrollTop = top;
+    if (focus) {
+      const found = Array.from(h.body.querySelectorAll<HTMLElement>(focus.kind === 'root' ? '[data-root]' : '[data-m9a-opt]')).find((el) => focus.kind === 'root'
+        ? el.dataset.root === focus.root
+        : el.dataset.src === focus.src && el.dataset.task === focus.task && el.dataset.path === focus.path);
+      found?.focus();
+    }
+    if (focusKey && !didFocusTask) {
+      didFocusTask = true;
+      const target = Array.from(h.body.querySelectorAll<HTMLElement>('[data-m9a-task-section]'))
+        .find((el) => el.dataset.m9aTaskSection === focusKey);
+      if (target) {
+        target.tabIndex = -1;
+        target.focus({ preventScroll: true });
+        target.scrollIntoView({ block: 'start' });
+      }
+    }
+    const save = h.foot.querySelector<HTMLButtonElement>('[data-save]');
+    if (save) { save.disabled = busy || !compatible(); save.textContent = busy ? '保存中…' : '保存'; }
+    const sw = h.foot.querySelector<HTMLButtonElement>('[data-sw]');
+    if (sw && isCur) sw.remove();
+  }
+
+  h.body.addEventListener('change', (e) => {
+    const el = (e.target as HTMLElement).closest<HTMLElement>('[data-root],[data-m9a-opt]');
+    if (!el || busy) return;
+    if (el.dataset.root) {
+      if (el.dataset.root === 'resource') resource = (el as HTMLSelectElement).value;
+      if (el.dataset.root === 'controller') controller = (el as HTMLSelectElement).value;
+      if (el.dataset.root === 'preset') preset = (el as HTMLSelectElement).value;
+      render(el);
+      return;
+    }
+    if (el.dataset.m9aOpt !== undefined) {
+      const source = el.dataset.src as M9aSource;
+      const path = JSON.parse(el.dataset.path || '[]') as string[];
+      const select = el as HTMLSelectElement;
+      const taskKey = el.dataset.task;
+      const queue = queueNow();
+      const task = taskKey === undefined ? undefined : queue.findIndex((item) => item.key === taskKey);
+      let nodes: M9aOptionNode[];
+      if (source === 'task') {
+        if (task === undefined || task < 0) return;
+        const item = queue[task];
+        if (!item) return;
+        nodes = nodesForTask(item.name);
+      } else nodes = source === 'resource'
+        ? nodesForScoped('resource', resource)
+        : source === 'controller' ? nodesForScoped('controller', controller) : globalNodes;
+      if (select.multiple) m9aSetNode(nodes, path, { selected_cases: Array.from(select.selectedOptions).map((o) => o.value) });
+      else {
+        const defs = source === 'task' ? (task === undefined ? [] : m9aTaskDef(cat, queue[task]) || []) : source === 'resource' ? cat.resourceOptions[resource] || [] : source === 'controller' ? cat.controllerOptions[controller] || [] : cat.globalOptions;
+        const def = defs.find((d) => d.name === path[path.length - 1]);
+        const idx = (def?.cases || []).findIndex((c) => c.name === select.value);
+        m9aSetNode(nodes, path, { selected_case: select.value, index: idx >= 0 ? idx : undefined });
+      }
+      render(el);
+    }
+  });
+
   (h.foot.querySelector('[data-cancel]') as HTMLElement).addEventListener('click', () => h.close());
   const sw = h.foot.querySelector('[data-sw]') as HTMLButtonElement | null;
   if (sw) {
@@ -918,8 +1693,7 @@ export function openM9aDrawer(inst: M9aInst, isCur: boolean, bridge: Bridge, aft
         void bridge.assistM9aSwitch(inst.id, inst.name).then((r) => {
           if (r.ok) S.pushLog('OK', '已切到实例 ' + (inst.name || inst.id));
           else S.pushLog('ERROR', '切实例失败：' + (r.error || ''));
-          h.close();
-          after();
+          h.close(); after();
         });
         return;
       }
@@ -928,4 +1702,49 @@ export function openM9aDrawer(inst: M9aInst, isCur: boolean, bridge: Bridge, aft
       window.setTimeout(() => { if (sw.isConnected && !sw.disabled) sw.textContent = sw.dataset.cf || '切到这台'; }, 4000);
     });
   }
+
+  const save = h.foot.querySelector<HTMLButtonElement>('[data-save]') as HTMLButtonElement;
+  save.addEventListener('click', () => {
+    if (busy) return;
+    if (!compatible()) { S.pushLog('ERROR', inst.name + ' 保存被拦：资源与控制器不兼容'); return; }
+    const patch: Record<string, unknown> = { name: inst.name };
+    if (resource !== (inst.resource || '')) patch.resource = resource;
+    if (controller !== (inst.controller || '')) patch.controller = controller;
+    if (preset !== (inst.preset || '')) patch.preset = preset;
+    const queue = queueNow();
+    const keys = queue.map((t) => t.key);
+    if (m9aQueueIsDirty(inst)) {
+      if (keys.some((k) => !parseM9aHistory(k))) { S.pushLog('ERROR', inst.name + ' 保存被拦：队列里有无法识别的旧任务格式'); return; }
+      patch.currentTasks = keys;
+    }
+    const optionEdits: M9aOptionEdit[] = [];
+    const seenTasks = new Set<string>();
+    queue.forEach((t, i) => {
+      if (seenTasks.has(t.name)) return; // 同名重复项共用 M9A 按任务名保存的同一份选项。
+      seenTasks.add(t.name);
+      const defs = m9aTaskDef(cat, t);
+      if (defs) collectM9aEdits(defs, nodesForTask(t.name), cloneNodes(baseTaskNodes.get(t.name)), 'task', i, optionEdits);
+    });
+    collectM9aEdits(cat.resourceOptions[resource] || [], nodesForScoped('resource', resource), baseScopedNodes.resource.get(resource) || [], 'resource', undefined, optionEdits);
+    collectM9aEdits(cat.controllerOptions[controller] || [], nodesForScoped('controller', controller), baseScopedNodes.controller.get(controller) || [], 'controller', undefined, optionEdits);
+    collectM9aEdits(cat.globalOptions, globalNodes, inst.globalOptions || [], 'global', undefined, optionEdits);
+    if (optionEdits.length) patch.optionEdits = optionEdits;
+    if (Object.keys(patch).length === 1) { S.pushLog('OK', inst.name + ' 跟文件里一致，没有写盘'); return; }
+    if (!m9aQueueSaveBegin(inst)) { S.pushLog('ERROR', inst.name + ' 正在保存，请等上一笔完成'); return; }
+    busy = true; render();
+    void bridge.assistM9aSaveInstance(inst.id, inst.name, patch).then((r) => {
+      busy = false;
+      m9aQueueSaveEnd(inst);
+      if (r.ok) {
+        if (patch.currentTasks) m9aQueueCommit(inst, patch.currentTasks as string[]);
+        S.pushLog('OK', inst.name + ' 实例配置已保存（原位写入、备份、回读对平）');
+        h.close(); after();
+      } else {
+        render();
+        S.pushLog('ERROR', inst.name + ' 保存失败：' + (r.error || '未知错误'));
+      }
+    }).catch((e) => { busy = false; m9aQueueSaveEnd(inst); render(); S.pushLog('ERROR', inst.name + ' 保存失败：' + String(e)); });
+  });
+
+  render();
 }

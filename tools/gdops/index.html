@@ -53,9 +53,11 @@
       <div class="panel-b">
         <div class="live">
           <div class="vframe" id="vframe">
-            <span class="tag">最近救援截图 · 演示</span>
-            <div class="cross"></div>
-            <div class="cap" id="vcap">state/rescue/ark-stall1-1109-181204-before.png（演示占位）</div>
+            <span class="tag" id="previewTag">实时游戏画面 · 待机</span>
+            <button class="btn mini preview-btn" id="previewBtn" disabled>开启画面</button>
+            <img id="previewImg" alt="当前选中游戏的实时画面" hidden>
+            <div class="cross" id="previewEmpty"></div>
+            <div class="cap" id="previewCap">等待游戏路读数；不占用前台、不注入操作</div>
           </div>
           <div class="supkv">
             <div class="kv"><span class="k">状态 state</span><span class="v" id="svState">idle</span></div>
@@ -105,7 +107,7 @@
       </div>
     </section>
     <section class="panel" style="--d:.34s;flex:1">
-      <div class="panel-h"><span class="cn">快捷开关</span><span class="en">RUNTIME</span><button class="btn mini" id="fullSet">完整设置</button><button class="btn mini" id="diagBtn">诊断</button><span class="idx">08</span></div>
+      <div class="panel-h"><span class="cn">快捷开关</span><span class="en">RUNTIME</span><button class="btn mini" id="fullSet" data-drawer-toggle="settings">完整设置</button><button class="btn mini" id="diagBtn">诊断</button><span class="idx">08</span></div>
       <div class="panel-b">
         <div class="sws" id="sws"></div>
       </div>

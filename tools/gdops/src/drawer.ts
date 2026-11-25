@@ -10,6 +10,10 @@ export interface DrawerHandle {
   close: () => void;
 }
 
+export interface DrawerOptions {
+  anchor?: 'left' | 'right';
+}
+
 let live: { pane: HTMLElement; timer: number; onKey: (e: KeyboardEvent) => void; onDoc: (e: MouseEvent) => void; close: () => void } | null = null;
 let liveKey = '';
 
@@ -26,15 +30,15 @@ export function closeDrawer(): void {
   if (live) live.close();
 }
 
-export function openDrawer(title: string, sub: string, bodyHtml: string, footHtml: string, key = ''): DrawerHandle {
+export function openDrawer(title: string, sub: string, bodyHtml: string, footHtml: string, key = '', options: DrawerOptions = {}): DrawerHandle {
   closeNow();
   liveKey = key;
   const prevFocus = document.activeElement as HTMLElement | null;
 
-  // 宿主：.console 里绝对定位的浮层（左列右边）；栅格列数不变，中列/右列不挤压。
+  // 宿主：.console 里绝对定位的浮层；栅格列数不变，默认从左列右侧展开，设置页从右列左侧展开。
   const consoleEl = document.querySelector('.console') as HTMLElement | null;
   const pane = document.createElement('section');
-  pane.className = 'panel drPanel';
+  pane.className = 'panel drPanel' + (options.anchor === 'right' ? ' right' : '');
   pane.setAttribute('role', 'dialog');
   pane.setAttribute('aria-modal', 'false');
   pane.innerHTML =
@@ -61,11 +65,11 @@ export function openDrawer(title: string, sub: string, bodyHtml: string, footHtm
   };
   document.addEventListener('keydown', onKey);
 
-  // 点外面自动收回；齿轮本身除外——同一条齿轮再点由队列侧判「收」，另一条则换开。
+  // 点外面自动收回；齿轮与设置入口除外——同一入口再点由调用侧判「收」，另一个入口则换开。
   const onDoc = (e: MouseEvent) => {
     const t = e.target as Node | null;
     if (!t || pane.contains(t)) return;
-    if (t instanceof Element && t.closest('[data-g]')) return;
+    if (t instanceof Element && t.closest('[data-g],[data-drawer-toggle]')) return;
     close();
   };
   document.addEventListener('click', onDoc);

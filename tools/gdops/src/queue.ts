@@ -1,11 +1,10 @@
 // 左列「任务队列」：跟随「游戏路」选中切换 MAA 任务清单 / M9A 实例清单。
-// 判定仍在核内：勾选写的是 settings 的两枚名单（下一轮由内核重建 MAA 队列），
-// 这里只做收值、两击确认与回执落日志。齿轮 → 右侧二级框（taskcfg.ts）看/改这一条的全量参数。
+// 判定仍在核内：MAA 勾选写 settings 名单；M9A 每个任务行右侧的齿轮编辑当前实例并定位该任务。
 import { $, esc, on } from './util';
 import * as S from './state';
 import type { Bridge } from './bridge';
-import type { ActResult, AssistState, MaaState, MaaTask, M9aState } from './types';
-import { openMaaTaskDrawer, openM9aDrawer } from './taskcfg';
+import type { ActResult, AssistState, MaaState, MaaTask, M9aInst, M9aState } from './types';
+import { m9aQueueFor, m9aQueueIdentity, m9aQueueSaveInFlight, m9aQueueSet, m9aQueueToggle, openMaaTaskDrawer, openM9aDrawer, parseM9aHistory, saveM9aQueueDraft } from './taskcfg';
 import { closeDrawer, drawerKey, drawerOpen } from './drawer';
 
 let bridge: Bridge;
@@ -20,7 +19,8 @@ export function initQueue(b: Bridge): void {
   on('chain', renderQueue);         // 选路切换会发 'chain'（state.setSel）
   if (!wired) {
     wired = true;
-    $('#queue').addEventListener('click', onClick);
+    const el = $('#queue');
+    el.addEventListener('click', onClick);
   }
   void reload();
 }
@@ -29,9 +29,12 @@ export async function reload(): Promise<void> {
   if (loading) return;
   loading = true;
   renderQueue();
-  data = await bridge.assistState();
-  loading = false;
-  renderQueue();
+  try {
+    data = await bridge.assistState();
+  } finally {
+    loading = false;
+    renderQueue();
+  }
 }
 
 /* ── 渲染 ── */
@@ -48,22 +51,22 @@ function renderQueue(): void {
   if (en) en.textContent = 'QUEUE · ' + (wantM9a ? 'M9A' : 'MAA');
   if (!bridge) return;
   if (bridge.mode !== 'live') {
-    el.innerHTML = '<div class="qEmpty">演示数据不带 MAA / M9A 读数：装进 Tauri 壳里才读现场。</div>';
+    el.innerHTML = '<div class="qEmpty">演示数据不带 MAA / M9A 读数：装进 Tauri 壳里才读现场。</div>' + footHtml(wantM9a);
     return;
   }
   if (!data) {
-    el.innerHTML = '<div class="qEmpty">' + (loading ? '读数中…' : '读数没回来：点「刷新」再试') + '</div>';
+    el.innerHTML = '<div class="qEmpty">' + (loading ? '读数中…' : '读数没回来：点「刷新」再试') + '</div>' + footHtml(wantM9a);
     return;
   }
   if (!data.settingsPresent) {
-    el.innerHTML = '<div class="qEmpty warn">config/settings.json 不在：先跑 setup.ps1</div>';
+    el.innerHTML = '<div class="qEmpty warn">config/settings.json 不在：先跑 setup.ps1</div>' + footHtml(wantM9a);
     return;
   }
   el.innerHTML = (wantM9a ? m9aHtml(data.m9a) : maaHtml(data.maa)) + footHtml(wantM9a);
 }
 
 function footHtml(m9a: boolean): string {
-  const b = busy ? ' disabled' : '';
+  const b = busy || bridge.mode !== 'live' ? ' disabled' : '';
   return '<div class="qFoot">' +
     (m9a
       ? '<button class="btn mini" data-act="mumu-start" data-cf="再点一次：启动 MuMu"' + b + '>启动 MuMu</button>' +
@@ -108,28 +111,69 @@ function rowHtml(t: MaaTask, showCk: boolean): string {
 function m9aHtml(m: M9aState | null): string {
   if (!m) return '<div class="qEmpty warn">读不出 M9A 这一块（assist_state 没回数据）</div>';
   const ver = m.version && m.version.current ? m.version.current : '';
-  let head = '<div class="qHead">' + chip('M9A', m.running, '在') + chip('MuMu', !!m.mumu && m.mumu.android, '已启动') +
+  const head = '<div class="qHead">' + chip('M9A', m.running, '在') + chip('MuMu', !!m.mumu && m.mumu.android, '已启动') +
     chip('实例目录', m.instancesReady, '在位') + (ver ? '<span class="qChip">版本 <b>' + esc(ver) + '</b></span>' : '') + '</div>';
   if (!m.instances.length) return head + '<div class="qEmpty">实例目录里没有 json</div>';
   const rows = m.instances.map((it) => {
     const cur = !!m.current && m.current.id === it.id;
-    return '<div class="qRow' + (cur ? ' on cur' : '') + '">' +
+    const row = '<div class="qRow' + (cur ? ' on cur' : '') + '">' +
       '<span class="qDot"></span>' +
       '<span class="qName">' + esc(it.name || it.id) + '</span>' +
       (cur ? '<span class="qTag ok">当前</span>' : '') +
       '<span class="qMeta">' + it.taskCount + ' 个任务</span>' +
-      '<button class="qGear" data-g="m9a:' + esc(it.id) + '" title="实例详情（右侧二级框）"' + (busy ? ' disabled' : '') + '>⚙</button>' +
       (cur ? '' : '<button class="btn mini" data-sw="' + esc(it.id) + '" data-name="' + esc(it.name) + '" data-cf="再点一次：切到这台"' + (busy ? ' disabled' : '') + '>切到</button>') +
       '</div>';
+    return row + (cur ? m9aQueueHtml(it, m) : '');
   }).join('');
   return head + rows;
 }
 
+/** 类 MAA 的任务清单：只切换任务进出队列，不提供拖拽、上移/下移或添加顺序编辑。 */
+function m9aQueueHtml(inst: M9aInst, m: M9aState): string {
+  const queue = m9aQueueFor(inst);
+  const present = new Set(queue.map(m9aQueueIdentity));
+  const locked = busy || loading || m9aQueueSaveInFlight(inst);
+  const rows = queue.map((t, i) => m9aTaskRow(inst.id, m9aQueueIdentity(t), t.name, t.entry, true, i, locked)).join('');
+  const missing = (m.catalogs?.tasks || [])
+    .map((t) => t.name + '<|||>' + t.entry)
+    .filter((key) => !present.has(key));
+  const offRows = missing.map((key) => {
+    const task = parseM9aHistory(key);
+    return task ? m9aTaskRow(inst.id, task.key, task.name, task.entry, false, -1, locked) : '';
+  }).join('');
+  return '<div class="qSub qM9aTasks">' +
+    (rows + offRows || '<div class="qEmpty">这台实例没有可用任务</div>') +
+    (!m.catalogs ? '<div class="qHint">候选目录没读回来：当前只显示队列内任务。</div>' : '') +
+    '</div>';
+}
+
+function m9aTaskRow(instId: string, key: string, name: string, entry: string, on: boolean, index: number, locked: boolean): string {
+  const dis = locked ? ' disabled' : '';
+  const title = on ? '取消 = 从当前实例队列移出' : '勾上 = 加入当前实例队列末尾';
+  return '<div class="qRow qTask' + (on ? ' on' : '') + '">' +
+    '<button class="qCk' + (on ? ' on' : '') + '" data-qkey="' + esc(key) + '" data-qidx="' + index + '"' +
+      ' aria-pressed="' + (on ? 'true' : 'false') + '" title="' + title + '"' + dis + '></button>' +
+    '<span class="qName" title="' + esc(name + (entry ? ' · ' + entry : '')) + '">' + esc(name) + '</span>' +
+    (entry ? '<span class="qMeta" title="' + esc(entry) + '">' + esc(entry) + '</span>' : '') +
+    '<button class="qGear" data-g="m9a:' + esc(instId) + ':task:' + esc(key) + '" title="配置这个任务（右侧二级框）" aria-label="配置 ' + esc(name) + '"' + dis + '>⚙</button>' +
+    '</div>';
+}
+
 /* ── 交互 ── */
+
+function currentM9a(): M9aInst | null {
+  return data?.m9a?.current || null;
+}
 
 function onClick(e: MouseEvent): void {
   const t = (e.target as HTMLElement).closest('button') as HTMLButtonElement | null;
-  if (!t || busy) return;
+  if (!t || busy || loading) return;
+  if (t.dataset.qkey !== undefined) {
+    const inst = currentM9a();
+    if (!inst || m9aQueueSaveInFlight(inst)) return;
+    void toggleM9aTask(inst, t.dataset.qkey, Number(t.dataset.qidx ?? '-1'));
+    return;
+  }
   if (t.dataset.g !== undefined) {
     openGear(t.dataset.g);
     return;
@@ -155,8 +199,23 @@ function onClick(e: MouseEvent): void {
   }
 }
 
-/** 齿轮：右侧二级框。MAA 一条任务 = 全量参数；M9A 一台实例 = 只读详情。
- *  同一条齿轮再点一次 = 收回（另一条则直接换开）。 */
+/** 队列动作单独持锁到刷新完成，避免快速连点让旧快照把草稿回滚。 */
+async function toggleM9aTask(inst: M9aInst, key: string, index: number): Promise<void> {
+  const queue = m9aQueueToggle(m9aQueueFor(inst), key, index);
+  if (!queue) return;
+  busy = true;
+  m9aQueueSet(inst, queue);
+  renderQueue();
+  let r: ActResult;
+  try { r = await saveM9aQueueDraft(inst, bridge); } catch (e) { r = { ok: false, error: String(e) }; }
+  report('保存队列', r);
+  try { await reload(); } catch (e) { S.pushLog('ERROR', '队列已处理，但刷新失败：' + String(e)); }
+  busy = false;
+  renderQueue();
+}
+
+/** 详情入口：右侧二级框。MAA 一条任务 = 全量参数；M9A 每个任务行 = 当前实例配置并定位该任务。
+ *  同一条入口再点一次 = 收回（另一条则直接换开）。 */
 function openGear(g: string): void {
   if (!data) return;
   if (drawerOpen() && drawerKey() === g) {
@@ -170,9 +229,12 @@ function openGear(g: string): void {
     return;
   }
   if (g.startsWith('m9a:')) {
-    const id = g.slice(4);
+    const taskMark = ':task:';
+    const markAt = g.indexOf(taskMark, 4);
+    const id = markAt >= 0 ? g.slice(4, markAt) : g.slice(4);
+    const focusKey = markAt >= 0 ? g.slice(markAt + taskMark.length) : undefined;
     const inst = data.m9a ? data.m9a.instances.find((x) => x.id === id) : null;
-    if (inst) openM9aDrawer(inst, !!data.m9a?.current && data.m9a.current.id === id, bridge, () => { void reload(); });
+    if (inst && data.m9a) openM9aDrawer(inst, !!data.m9a.current && data.m9a.current.id === id, bridge, () => { void reload(); }, data.m9a.catalogs, focusKey);
   }
 }
 
@@ -186,7 +248,8 @@ export async function autoOpenDrawer(kind: 'maa' | 'm9a', taskType?: string): Pr
     if (kind === 'm9a') {
       const m = data.m9a;
       const inst = m ? (m.current || m.instances[0] || null) : null;
-      if (m && inst) openM9aDrawer(inst, !!m.current && m.current.id === inst.id, bridge, () => { void reload(); });
+      const firstTask = inst ? m9aQueueFor(inst)[0] : undefined;
+      if (m && inst) openM9aDrawer(inst, !!m.current && m.current.id === inst.id, bridge, () => { void reload(); }, m.catalogs, firstTask?.key);
       else S.pushLog('WARN', 'AUTODRAWER：没有可打开的 M9A 实例');
       return;
     }

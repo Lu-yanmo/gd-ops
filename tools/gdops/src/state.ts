@@ -3,7 +3,7 @@
 // live 模式下 GAME_IDS/GAMES/times/门状态全部由 summary（核内 emit-panel-summary）灌进来，不写死两路。
 import { dstr, now, rnd, esc, emit, REDUCED } from './util';
 import { gateState, timesOf, type SummaryModel } from './summary';
-import type { Ev, Game, GameId, GameStatus, Level, LogLine, RunLock, SwitchDef } from './types';
+import type { Ev, Game, GameId, GameStatus, Level, LogLine, RunLock, SwitchDef, CaptureView } from './types';
 
 export const GAME_IDS: GameId[] = ['ark', 'r1999'];
 export const GAMES: Record<GameId, Game> = {
@@ -47,8 +47,8 @@ export const SW: SwitchDef[] = [
 // 执行现场读数（原型里直写 DOM 的那几枚，收进一个对象走 'live' 事件）。
 export const live = {
   state: 'idle', alive: '—', age: '—', action: 'none', hot: false,
-  vcap: 'state/rescue/ark-stall1-1109-181204-before.png（演示占位）',
   vcalls: 'qwen-vl · 200 · 1.8s',
+  capture: { active: false, state: 'paused', updated: 0, error: '', stale: false } as CaptureView,
 };
 export let lastRoundHtml = '上一轮：<b>今日 19:30 · 全成</b> · 24m12s · ark ok / r1999 ok（history.csv 尾行·演示）';
 
@@ -173,8 +173,8 @@ export function enterLive(): void {
   live.alive = '—';
   live.age = '—';
   live.action = 'none';
-  live.vcap = '—';
   live.vcalls = '—';
+  live.capture = { active: false, state: 'paused', updated: 0, error: '', stale: false };
 }
 
 // 运行锁：起/停只在这里翻一次牌（日志也只写一次），轮询本身不刷屏。
@@ -296,7 +296,6 @@ function tickEvent(): void {
     if (e.fx === 'warn-off') { warnAuto = false; live.hot = false; emit('theme'); emit('live'); }
     if (e.fx === 'rescue') {
       rescueUsed = 1; emit('pips');
-      live.vcap = 'state/rescue/ark-stall1-1109-181204-before.png → after1.png（演示）';
       live.vcalls = 'qwen-vl · 200 · 1.8s · 今日 4  calls'; emit('live');
     }
     if (e.fx === 'retry' && e.g && e.i !== undefined) setStep(e.g, e.i, 'run retry');

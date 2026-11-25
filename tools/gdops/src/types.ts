@@ -132,8 +132,9 @@ export interface MaaCatalogs {
   foldartals: string[];                          // 萨米密文板
   paradigms: string[];                           // 坍缩范式
   items: string[];                               // item_index 全部条目名（信用商店名单用）
-  infrasts: string[];                            // resource/custom_infrast 的文件名（不带 .json）
+  infrasts: string[];                            // resource/custom_infrast/<文件>.json（MAA 按路径读）
   rogueOpers: string[];                          // 各主题 recruitment.json 的开局干员并集
+  rogueOpersByTheme?: Record<string, string[]>;  // 开局干员按主题分表，只收 is_start=true
 }
 
 export interface MaaState {
@@ -151,15 +152,70 @@ export interface MaaState {
   plan: MaaPlan;
 }
 
+export interface M9aOptionCase {
+  name: string;
+  label?: string;
+  description?: string;
+  options?: string[];       // 选中这一 case 后激活的子选项名
+}
+
+export interface M9aOptionInput {
+  name: string;
+  label?: string;
+  default?: string;
+  password?: boolean;
+}
+
+export interface M9aOptionDef {
+  name: string;             // 配置身份：interface/tasks 选项对象的外层键
+  label?: string;           // 本机 zh_cn 展示名；缺失时回退 name
+  description?: string;
+  type: 'switch' | 'select' | 'checkbox' | 'input' | 'hotkey';
+  cases?: M9aOptionCase[];
+  defaultCase?: string | string[];
+  inputs?: M9aOptionInput[];
+}
+
+export interface M9aOptionNode {
+  name: string;
+  index?: number;
+  selected_case?: string;
+  selected_cases?: string[];
+  data?: Record<string, string>;  // 仅回非密码 input 的现值；面板不编辑
+  sub_options?: M9aOptionNode[];
+}
+
+export interface M9aTaskDef {
+  name: string;
+  entry: string;
+  options: M9aOptionDef[];
+}
+
+export interface M9aCatalogs {
+  resources: { name: string; controllers: string[] }[];
+  controllers: string[];
+  presets: { name: string; tasks: string[] }[];
+  tasks: M9aTaskDef[];
+  resourceOptions: Record<string, M9aOptionDef[]>;
+  controllerOptions: Record<string, M9aOptionDef[]>;
+  globalOptions: M9aOptionDef[];
+}
+
 export interface M9aInst {
   id: string;
   name: string;
   taskCount: number;
   tasks: string[];
   allTasks?: string[];     // 右侧二级框的完整任务表（卡面只用 tasks 的前五枚）
+  currentTasks?: string[]; // 原样有序队列：显示名<|||>entry
+  taskItems?: { name: string; entry?: string; option?: M9aOptionNode[] }[];
   resource?: string;
   controller?: string;
   preset?: string;
+  keepEmptyTaskQueue?: boolean;
+  resourceOptions?: M9aOptionNode[];
+  controllerOptions?: M9aOptionNode[];
+  globalOptions?: M9aOptionNode[];
   adbSerial: string;
   adbName: string;
 }
@@ -188,6 +244,7 @@ export interface M9aState {
   noAutoStart: string;
   instances: M9aInst[];
   current: M9aInst | null;
+  catalogs?: M9aCatalogs;
   version: { current?: string; repo?: string; error?: string };
   conn: { serial: string; name: string } | null;
   connError: string | null;
@@ -202,8 +259,36 @@ export interface M9aState {
   plan: M9aPlan;
 }
 
+// 右栏 runtime 开关：null = 配置缺键或不是布尔值；绝不把缺省值冒充现值。
+export interface RuntimeFlags {
+  [key: string]: boolean | null;
+}
+
+// 执行现场实时帧：独立于 6 秒快照；Rust 不回传窗口标题、ADB 序列号或本机路径。
+export interface CaptureFrame {
+  ok: boolean;
+  state: 'ready' | 'dark' | 'connecting' | 'paused' | 'missing' | 'minimized' | 'offline' | 'failed' | 'unsupported';
+  source?: 'window' | 'adb';
+  image?: string;
+  width?: number;
+  height?: number;
+  capturedAt?: number;
+  meanLuma?: number;
+  error?: string;
+  note?: string;
+}
+export interface CaptureView {
+  active: boolean;
+  state: CaptureFrame['state'];
+  source?: CaptureFrame['source'];
+  updated: number;
+  error: string;
+  stale: boolean;
+}
+
 export interface AssistState {
   settingsPresent: boolean;
+  runtimeFlags?: RuntimeFlags;
   maa: MaaState | null;
   m9a: M9aState | null;
   note?: string;

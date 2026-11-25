@@ -1,7 +1,7 @@
 // 桥接层：UI 只依赖这个接口。web 浏览器走 DemoBridge（演示数据，与原型逐字同源）；
 // Tauri 壳走 TauriBridge（mode=live：状态走核内 summary，控制走内核 verb / 入口脚本）。
 // shell 表示宿主（web 浏览器 / tauri 桌面壳），mode 表示内核（demo 演示 / live 真实）。
-import type { ActResult, AppInfo, AssistState, GameId, Snapshot } from './types';
+import type { ActResult, AppInfo, AssistState, CaptureFrame, GameId, Snapshot } from './types';
 import type { SummaryModel } from './summary';
 import { parseSummary } from './summary';
 import { esc, humanAge, pad } from './util';
@@ -14,6 +14,7 @@ export interface Bridge {
   mode: 'demo' | 'live';
   appInfo(): Promise<AppInfo>;
   snapshot(fresh?: boolean): Promise<Snapshot | null>;  // 只读实况；浏览器/demo 恒 null
+  captureFrame(game: GameId): Promise<CaptureFrame>;    // 实时画面独立通道；不读配置值到前端
   summary(fresh?: boolean): Promise<SummaryModel | null>; // 核内协议 v2（状态真身）；demo 恒 null
   chainRun(kind: 'dry'): Promise<ChainStart>;         // 起一轮 -DryRun 预演（只有 Tauri 壳能起）
   chainStop(): Promise<boolean>;                      // 结束本应用起的进程树
@@ -39,6 +40,7 @@ export interface Bridge {
   assistState(): Promise<AssistState | null>;
   assistSavePlan(edits: { key: string; value: unknown }[]): Promise<ActResult>;
   assistM9aSwitch(id: string, name: string): Promise<ActResult>;
+  assistM9aSaveInstance(id: string, name: string, patch: Record<string, unknown>): Promise<ActResult>;
   assistMaaSetTask(kind: string, enable: boolean): Promise<ActResult>;
   assistMaaSetAll(enable: boolean): Promise<ActResult>;
   /* 右侧二级框：一条 MAA 任务的若干键（原位改写；MAA 在跑拒写） */
@@ -59,6 +61,9 @@ export class DemoBridge implements Bridge {
   mode: 'demo' | 'live' = 'demo';
   async appInfo(): Promise<AppInfo> { return DEMO_INFO; }
   async snapshot(): Promise<Snapshot | null> { return null; }
+  async captureFrame(_game: GameId): Promise<CaptureFrame> {
+    return { ok: false, state: 'unsupported', error: '浏览器演示模式不捕获真实游戏画面' };
+  }
   async summary(): Promise<SummaryModel | null> { return null; }
   async chainRun(_kind: 'dry'): Promise<ChainStart> { return { ok: false, error: '浏览器演示模式不起进程（桌面壳里才有预演）' }; }
   async chainStop(): Promise<boolean> { return false; }
@@ -99,6 +104,7 @@ export class DemoBridge implements Bridge {
   async assistState(): Promise<AssistState | null> { return null; }
   async assistSavePlan(_edits: { key: string; value: unknown }[]): Promise<ActResult> { return { ok: false, error: '浏览器演示模式不改配置' }; }
   async assistM9aSwitch(_id: string, _name: string): Promise<ActResult> { return { ok: false, error: '浏览器演示模式不起进程' }; }
+  async assistM9aSaveInstance(_id: string, _name: string, _patch: Record<string, unknown>): Promise<ActResult> { return { ok: false, error: '浏览器演示模式不改配置' }; }
   async assistMaaSetTask(_kind: string, _enable: boolean): Promise<ActResult> { return { ok: false, error: '浏览器演示模式不改配置' }; }
   async assistMaaSetAll(_enable: boolean): Promise<ActResult> { return { ok: false, error: '浏览器演示模式不改配置' }; }
   async assistMaaSaveTask(_idx: number, _taskType: string, _name: string, _patch: Record<string, unknown>): Promise<ActResult> { return { ok: false, error: '浏览器演示模式不改配置' }; }
@@ -160,6 +166,32 @@ export class TauriBridge extends DemoBridge {
     } catch { return this.cache; }
   }
 
+  override async captureFrame(game: GameId): Promise<CaptureFrame> {
+    try {
+      const raw = await this.invoke('live_capture', { game });
+      const v = raw as CaptureFrame;
+      const states: CaptureFrame['state'][] = ['ready', 'dark', 'connecting', 'paused', 'missing', 'minimized', 'offline', 'failed', 'unsupported'];
+      if (!v || typeof v.ok !== 'boolean' || !states.includes(v.state)
+        || (v.source !== undefined && v.source !== 'window' && v.source !== 'adb')) {
+        return { ok: false, state: 'failed', error: '实时画面回执形态异常' };
+      }
+      if (v.ok) {
+        const validStamp = Number.isSafeInteger(v.capturedAt) && (v.capturedAt as number) > 0
+          && (v.capturedAt as number) <= Date.now() + 2000;
+        if (typeof v.image !== 'string' || !/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(v.image)
+          || v.image.length > 24_000_000 || !validStamp
+          || !Number.isFinite(v.width) || !Number.isFinite(v.height)) {
+          return { ok: false, state: 'failed', error: '实时画面数据校验失败' };
+        }
+      } else if (v.image !== undefined) {
+        return { ok: false, state: 'failed', error: '失败回执不应携带画面' };
+      }
+      return v;
+    } catch (e) {
+      return { ok: false, state: 'failed', error: String(e) };
+    }
+  }
+
   // 状态真身：核内 emit-panel-summary（协议 v2）。解析失败就回 null，让上层显示"读不出"而不是旧值装新。
   override async summary(): Promise<SummaryModel | null> {
     try { return parseSummary(await this.invoke('panel_summary')); } catch { return null; }
@@ -212,6 +244,10 @@ export class TauriBridge extends DemoBridge {
 
   override async assistM9aSwitch(id: string, name: string): Promise<ActResult> {
     return this.act('assist_m9a_switch', { id, name });
+  }
+
+  override async assistM9aSaveInstance(id: string, name: string, patch: Record<string, unknown>): Promise<ActResult> {
+    return this.act('assist_m9a_save_instance', { id, name, patch });
   }
 
   override async assistMaaSetTask(kind: string, enable: boolean): Promise<ActResult> {

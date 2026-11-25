@@ -9,9 +9,20 @@
 //     这几个键"逐值比一遍，对不上就拒写。缺键不补行——补行是 setup.ps1 的事。
 //   * 回给界面的文本一律过 `scrub`：把本机绝对路径换成 `<本地路径>`。Key／token 这类键根本不出这个文件。
 use serde_json::{json, Value};
+use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::sync::{Mutex, MutexGuard};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+// 所有 IPC 保存都经 spawn_blocking；锁必须包住「读旧值 → 备份 → 原位写 → 回读」整段，
+// 否则助手页与右栏同时保存时，后写会覆盖先写，而且两边仍可能各自回读成功。
+static SETTINGS_WRITE_LOCK: Mutex<()> = Mutex::new(());
+static MAA_CONFIG_WRITE_LOCK: Mutex<()> = Mutex::new(());
+
+fn write_lock(lock: &'static Mutex<()>) -> Result<MutexGuard<'static, ()>, String> {
+    lock.lock().map_err(|_| "配置写锁中毒：重启面板后再试".to_string())
+}
 
 fn root() -> Result<PathBuf, String> {
     crate::live::find_root()
@@ -200,6 +211,7 @@ fn queue_types(cfg: &Path) -> Result<Vec<String>, String> {
 
 /// 任务勾选：只写 settings.ark 的两枚名单，返回核内回执原样（备份/校验在 save_plan 里）。
 pub fn maa_set_task(kind: String, enable: bool) -> Result<Value, String> {
+    let _write_guard = write_lock(&SETTINGS_WRITE_LOCK)?;
     if !valid_kind(&kind) {
         return Err("任务类型名不合法（只收字母数字/下划线/连字符）".to_string());
     }
@@ -215,7 +227,7 @@ pub fn maa_set_task(kind: String, enable: bool) -> Result<Value, String> {
     } else {
         toggle_lists(keep, off, &kind, enable)
     };
-    let mut r = save_plan(vec![
+    let mut r = save_plan_locked(&root, vec![
         json!({"key": "ark.keepQueuesEnabled", "value": keep}),
         json!({"key": "ark.disableQueues", "value": off}),
     ])?;
@@ -229,6 +241,7 @@ pub fn maa_set_task(kind: String, enable: bool) -> Result<Value, String> {
 
 /// 全选 / 清空：按 MAA 队列里真实出现的任务类型落名单（Fight 只进出禁用名单）。
 pub fn maa_set_all(enable: bool) -> Result<Value, String> {
+    let _write_guard = write_lock(&SETTINGS_WRITE_LOCK)?;
     let root = root()?;
     let s = read_settings(&root)?.ok_or_else(|| "config/settings.json 不在：先跑 setup.ps1".to_string())?;
     let cfg = maa_cfg_path(&root, &s);
@@ -256,7 +269,7 @@ pub fn maa_set_all(enable: bool) -> Result<Value, String> {
         }
         n += 1;
     }
-    let r = save_plan(vec![
+    let r = save_plan_locked(&root, vec![
         json!({"key": "ark.keepQueuesEnabled", "value": keep}),
         json!({"key": "ark.disableQueues", "value": off}),
     ])?;
@@ -321,7 +334,81 @@ fn jkind(v: &Value) -> &'static str {
     }
 }
 
-/// 值收口：新值必须跟原值同一种 JSON 类型；RoomList 例外（对象数组，只收 Room/IsEnabled）。
+/// MAA 6.23 的开局干员是 {Name, UseSupport} 对象数组，最多三项；不接收未知键。
+fn check_starting_opers(items: &[Value]) -> Result<(), String> {
+    if items.len() > 3 {
+        return Err("StartingOpers：最多三位开局干员".to_string());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for it in items {
+        let o = it.as_object().ok_or_else(|| "StartingOpers：每一项得是对象".to_string())?;
+        let name = o.get("Name").and_then(|x| x.as_str())
+            .ok_or_else(|| "StartingOpers：每一项得带文本 Name".to_string())?;
+        if name.is_empty() {
+            return Err("StartingOpers：Name 不能为空；空位请直接移除该项".to_string());
+        }
+        if name.contains('\0') {
+            return Err("StartingOpers：Name 里有 NUL".to_string());
+        }
+        if !seen.insert(name) {
+            return Err("StartingOpers：同一位干员不能重复".to_string());
+        }
+        if o.get("UseSupport").is_some_and(|x| !x.is_boolean()) {
+            return Err("StartingOpers：UseSupport 只收布尔值".to_string());
+        }
+        for k in o.keys() {
+            if k != "Name" && k != "UseSupport" {
+                return Err(format!("StartingOpers：对象多出键 {k}"));
+            }
+        }
+    }
+    Ok(())
+}
+
+fn check_blackflow_string(key: &str, value: &str) -> Result<(), String> {
+    let rewards = [
+        "None", "SerpentRewards", "UnnumberedItem", "SurveyAdvance", "SpaceLease",
+        "RegressionCompensation", "ForestRide", "NestParasitism", "Pegasus", "Hippogriff",
+        "Dragon", "Hydra", "BaiZe", "GoldenCrow",
+    ];
+    let result = if key.eq_ignore_ascii_case("BlackFlowEnding") {
+        (value == "Ending1").then_some(()).ok_or_else(|| "BlackFlowEnding：当前界面只开放 Ending1".to_string())
+    } else if key.eq_ignore_ascii_case("BlackFlowStartAnimal1") || key.eq_ignore_ascii_case("BlackFlowStartAnimal2") {
+        let animals = ["None", "Cat", "Dog", "Cerberus", "FeatheredSerpent"];
+        animals.contains(&value).then_some(()).ok_or_else(|| format!("{key}：动物值不在官方候选里"))
+    } else if key.eq_ignore_ascii_case("BlackFlowStartRewards") {
+        let values: Vec<&str> = value.split(',').map(str::trim).filter(|x| !x.is_empty()).collect();
+        let valid = if values.is_empty() || values == ["None"] {
+            true
+        } else {
+            !values.contains(&"None") && values.iter().all(|x| rewards.contains(x))
+        };
+        valid.then_some(()).ok_or_else(|| format!("{key}：奖励 Flags 含未知值或把 None 与其他项混用"))
+    } else {
+        return Ok(());
+    };
+    result
+}
+
+fn check_blackflow_priority(items: &[Value]) -> Result<(), String> {
+    let allowed = [
+        "Pegasus", "SpaceLease", "ForestRide", "UnnumberedItem", "RegressionCompensation",
+        "SurveyAdvance", "NestParasitism", "Hippogriff", "Dragon", "Hydra", "BaiZe", "GoldenCrow",
+    ];
+    if items.len() != allowed.len() {
+        return Err("BlackFlowStartRewardPriority：必须十二项".to_string());
+    }
+    let mut seen = std::collections::HashSet::new();
+    for item in items {
+        let value = item.as_str().ok_or_else(|| "BlackFlowStartRewardPriority：每项必须是文本".to_string())?;
+        if !allowed.contains(&value) || !seen.insert(value) {
+            return Err("BlackFlowStartRewardPriority：十二项必须各一次，且不能含未知值".to_string());
+        }
+    }
+    Ok(())
+}
+
+/// 值收口：新值必须跟原值同一种 JSON 类型；RoomList / StartingOpers 是受控对象数组例外。
 fn check_new_value(key: &str, old: &Value, new: &Value) -> Result<(), String> {
     match (old, new) {
         (Value::Bool(_), Value::Bool(_)) => Ok(()),
@@ -336,12 +423,18 @@ fn check_new_value(key: &str, old: &Value, new: &Value) -> Result<(), String> {
             if s.contains('\0') {
                 Err(format!("{key}：文本里有 NUL"))
             } else {
-                Ok(())
+                check_blackflow_string(key, s)
             }
         }
         (Value::Array(a), Value::Array(b)) => {
             if b.iter().any(|x| x.is_null()) {
                 return Err(format!("{key}：列表里不能有 null"));
+            }
+            if key.eq_ignore_ascii_case("StartingOpers") {
+                return check_starting_opers(b);
+            }
+            if key.eq_ignore_ascii_case("BlackFlowStartRewardPriority") {
+                return check_blackflow_priority(b);
             }
             if key.eq_ignore_ascii_case("RoomList") {
                 for it in b {
@@ -457,6 +550,7 @@ fn apply_task_patch(
 
 /// 保存一条 MAA 任务的若干键。MAA 在跑时拒写（它退出时会按内存回写，改了也白改）。
 pub fn maa_save_task(idx: usize, task_type: String, name: String, patch: Value) -> Result<Value, String> {
+    let _write_guard = write_lock(&MAA_CONFIG_WRITE_LOCK)?;
     if !valid_kind(&task_type) {
         return Err("任务类型名不合法（只收字母数字/下划线/连字符）".to_string());
     }
@@ -491,7 +585,8 @@ pub fn maa_save_task(idx: usize, task_type: String, name: String, patch: Value) 
     if changed.is_empty() {
         return Ok(json!({"ok": true, "changed": [], "note": "跟文件里一致，没写盘"}));
     }
-    let bk = backup(&root, &cfg);
+    let bk = backup(&root, &cfg)
+        .ok_or_else(|| "写前备份失败：拒绝改写 MAA 配置".to_string())?;
     let mut bytes = Vec::new();
     if had_bom {
         bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
@@ -519,7 +614,7 @@ pub fn maa_save_task(idx: usize, task_type: String, name: String, patch: Value) 
     Ok(json!({
         "ok": true,
         "changed": changed,
-        "backup": bk.unwrap_or_default(),
+        "backup": bk,
         "note": format!("已写入 MAA 配置第 {idx} 条（{task_type}）：只动这几项的值，其余字节原样")
     }))
 }
@@ -566,7 +661,7 @@ fn arr_strs(v: Option<&Value>, key: &str) -> Vec<String> {
 fn maa_catalogs(dir: &str) -> Value {
     if dir.is_empty() {
         return json!({"stages":[], "materials":[], "operators":[], "tags":[], "foldartals":[], "paradigms":[],
-            "items":[], "infrasts":[], "rogueOpers":[]});
+            "items":[], "infrasts":[], "rogueOpers":[], "rogueOpersByTheme":{}});
     }
     let stages = res_file(dir, &["stages.json"])
         .and_then(|v| v.as_array().cloned())
@@ -639,14 +734,15 @@ fn maa_catalogs(dir: &str) -> Value {
         })
         .unwrap_or_default();
 
-    // 自定义基建配置文件名（不带扩展名），MAA 的文件选择器就列这一夹。
+    // MAA 6.x 的 Filename 按路径读取；候选只列顶层 *.json，不递归、不剥扩展名。
     let infrasts = match fs::read_dir(Path::new(dir).join("resource").join("custom_infrast")) {
         Ok(rd) => {
             let mut v: Vec<String> = rd
                 .filter_map(|e| e.ok())
+                .filter(|e| e.file_type().map(|t| t.is_file()).unwrap_or(false))
                 .map(|e| e.file_name().to_string_lossy().to_string())
                 .filter(|n| n.to_ascii_lowercase().ends_with(".json"))
-                .map(|n| n[..n.len() - 5].to_string())
+                .map(|n| format!("resource/custom_infrast/{n}"))
                 .collect();
             v.sort();
             v
@@ -654,24 +750,31 @@ fn maa_catalogs(dir: &str) -> Value {
         Err(_) => Vec::new(),
     };
 
-    // 肉鸽开局干员：各主题 recruitment.json 的 priority[].opers[].name 并集。
+    // 开局干员按主题分表；官方候选逻辑只收 priority[].opers[] 里 is_start=true 的干员。
+    let mut rogue_by_theme = serde_json::Map::new();
     let mut rogue_opers: Vec<String> = Vec::new();
     if let Ok(rd) = fs::read_dir(Path::new(dir).join("resource").join("roguelike")) {
-        for e in rd.filter_map(|x| x.ok()) {
-            let p = e.path().join("recruitment.json");
-            if let Some(v) = read_json_loose(&p) {
+        for e in rd.filter_map(|x| x.ok()).filter(|e| e.file_type().map(|t| t.is_dir()).unwrap_or(false)) {
+            let theme = e.file_name().to_string_lossy().to_string();
+            let mut names = Vec::new();
+            if let Some(v) = read_json_loose(&e.path().join("recruitment.json")) {
                 if let Some(prio) = v.get("priority").and_then(|x| x.as_array()) {
                     for grp in prio {
                         if let Some(ops) = grp.get("opers").and_then(|x| x.as_array()) {
                             for o in ops {
-                                if let Some(n) = o.get("name").and_then(|x| x.as_str()) {
-                                    rogue_opers.push(n.to_string());
+                                if o.get("is_start").and_then(|x| x.as_bool()) == Some(true) {
+                                    if let Some(n) = o.get("name").and_then(|x| x.as_str()) {
+                                        names.push(n.to_string());
+                                    }
                                 }
                             }
                         }
                     }
                 }
             }
+            let names = uniq_strs(names);
+            rogue_opers.extend(names.iter().cloned());
+            rogue_by_theme.insert(theme, json!(names));
         }
     }
 
@@ -684,7 +787,8 @@ fn maa_catalogs(dir: &str) -> Value {
         "paradigms": paradigms,
         "items": items,
         "infrasts": infrasts,
-        "rogueOpers": uniq_strs(rogue_opers)
+        "rogueOpers": uniq_strs(rogue_opers),
+        "rogueOpersByTheme": Value::Object(rogue_by_theme)
     })
 }
 
@@ -701,7 +805,7 @@ fn stem(p: &str) -> String {
 
 /* ── 脱敏：本机绝对路径 → <本地路径>（界面与回执都不落真实路径） ── */
 
-fn scrub(s: &str) -> String {
+pub(crate) fn scrub(s: &str) -> String {
     let chars: Vec<char> = s.chars().collect();
     let mut out = String::new();
     let mut i = 0;
@@ -772,7 +876,26 @@ pub fn state() -> Result<Value, String> {
     };
     let maa = maa_state(&root, &settings);
     let m9a = m9a_state(&root, &settings);
-    Ok(json!({"settingsPresent": true, "maa": maa, "m9a": m9a}))
+    let runtime_flags = runtime_flags(&settings);
+    Ok(json!({"settingsPresent": true, "runtimeFlags": runtime_flags, "maa": maa, "m9a": m9a}))
+}
+
+/// 右栏开关只报文件现值；缺键/null/类型不对均为未知，不套用 setup 模板默认。
+fn runtime_flags(settings: &Value) -> Value {
+    let rt = ci(settings, "runtime").cloned().unwrap_or(json!({}));
+    let notify = ci(settings, "notify").cloned().unwrap_or(json!({}));
+    let mut out = serde_json::Map::new();
+    for key in ["retryOnce", "arkVisionRescue", "mumuVisionRescue", "visionAllowReward", "supervisor", "keepScreenOn", "abortOnMaaStallWarning"] {
+        out.insert(key.to_string(), match ci(&rt, key) {
+            Some(v) if v.is_boolean() => v.clone(),
+            _ => Value::Null,
+        });
+    }
+    out.insert("notify.toast".to_string(), match ci(&notify, "toast") {
+        Some(v) if v.is_boolean() => v.clone(),
+        _ => Value::Null,
+    });
+    Value::Object(out)
 }
 
 fn maa_state(root: &Path, settings: &Value) -> Value {
@@ -831,7 +954,7 @@ fn maa_state(root: &Path, settings: &Value) -> Value {
 
 /// 实例清单：读 appsettings 与实例目录下的逐台 json。这里是**展示用**的聚合（名字/任务名/ADB 串），
 /// 不复制任何判定规则：切实例仍走 apply-m9a-instance，探活仍走 read-m9a-connection。
-fn instances_now(dir: &str, app: &Value) -> (Vec<Value>, Option<Value>) {
+fn instances_now(dir: &str, app: &Value, catalogs: &Value) -> (Vec<Value>, Option<Value>) {
     let mut out = Vec::new();
     let rd = match fs::read_dir(dir) {
         Ok(r) => r,
@@ -858,8 +981,9 @@ fn instances_now(dir: &str, app: &Value) -> (Vec<Value>, Option<Value>) {
         };
         let name = s_ci(&v, "InstanceName");
         let id = f.file_stem().and_then(|x| x.to_str()).unwrap_or("").to_string();
-        let tasks: Vec<String> = strs(v.get("CurrentTasks"))
-            .into_iter()
+        let current_tasks = strs(ci(&v, "CurrentTasks"));
+        let tasks: Vec<String> = current_tasks
+            .iter()
             .map(|t| {
                 // 真实件里的分隔是 `<|||>`（三竖线）；老件见过 `<||>`，两种都认，取任务名那一段。
                 t.split("<|||>").next().unwrap_or("").split("<||>").next().unwrap_or("").to_string()
@@ -867,16 +991,25 @@ fn instances_now(dir: &str, app: &Value) -> (Vec<Value>, Option<Value>) {
             .filter(|t| !t.is_empty())
             .collect();
         let dev = v.get("AdbDevice").cloned().unwrap_or(json!({}));
+        let resource = s_ci(&v, "Resource");
+        let controller = s_ci(&v, "CurrentControllerName");
+        let task_items = m9a_safe_task_items(ci(&v, "TaskItems"), catalogs);
         let row = json!({
             "id": id,
             "name": name,
             "taskCount": tasks.len(),
             "tasks": tasks.iter().take(5).cloned().collect::<Vec<_>>(),
             // 右侧二级框要完整任务表与资源/控制器；卡面仍用上面截断的五枚。
-            "allTasks": tasks.clone(),
-            "resource": s_ci(&v, "Resource"),
-            "controller": s_ci(&v, "CurrentControllerName"),
+            "allTasks": tasks,
+            "currentTasks": current_tasks,
+            "taskItems": task_items,
+            "resource": resource,
+            "controller": controller,
             "preset": s_ci(&v, "InstancePresetKey"),
+            "keepEmptyTaskQueue": b_ci(&v, "KeepEmptyTaskQueue"),
+            "resourceOptions": m9a_safe_nodes(ci(&v, "ResourceOptionItems").and_then(|x| ci(x, &resource)), &m9a_named_defs(catalogs, "resourceOptions", &resource)),
+            "controllerOptions": m9a_safe_nodes(ci(&v, "ControllerOptionItems").and_then(|x| ci(x, &controller)), &m9a_named_defs(catalogs, "controllerOptions", &controller)),
+            "globalOptions": m9a_safe_nodes(ci(&v, "GlobalOptionItems"), catalogs.get("globalOptions").and_then(|x| x.as_array()).map(|x| x.as_slice()).unwrap_or(&[])),
             "adbSerial": s_ci(&dev, "AdbSerial"),
             "adbName": s_ci(&dev, "Name")
         });
@@ -889,6 +1022,74 @@ fn instances_now(dir: &str, app: &Value) -> (Vec<Value>, Option<Value>) {
         out.push(row);
     }
     (out, current)
+}
+
+// 实时画面的目标只在 Rust 内解析；序列号、绝对路径、窗口标题均不交给前端。
+pub(crate) struct CaptureTarget {
+    pub process: String,
+    pub adb: PathBuf,
+    pub serial: String,
+}
+
+pub(crate) fn capture_target(game: &str) -> Result<CaptureTarget, String> {
+    let root = crate::live::find_root()
+        .ok_or_else(|| "找不到仓库根目录（把 gdops.exe 放进仓库，或设 GDOPS_ROOT）".to_string())?;
+    let settings = read_settings(&root)?.ok_or_else(|| "settings.json 不在，无法定位游戏画面".to_string())?;
+    let paths = ci(&settings, "paths").cloned().unwrap_or(json!({}));
+    if game.eq_ignore_ascii_case("ark") {
+        let process = stem(&s_ci(&paths, "arknightsExe"));
+        if process.is_empty() { return Err("端游进程名未配置，无法定位明日方舟窗口".to_string()); }
+        return Ok(CaptureTarget { process, adb: PathBuf::new(), serial: String::new() });
+    }
+    if game.eq_ignore_ascii_case("r1999") {
+        let dir = s_ci(&paths, "m9aDir");
+        // mumuAdb 的相对基准与内核 Gate.Host.MuMuEndpoint 一致：mumuDir，不是 m9aDir。
+        let adb = capture_adb_path(&paths);
+        if !adb.is_file() { return Err("模拟器 adb.exe 不在，无法读取 M9A 设备画面".to_string()); }
+        let app_path = join_rel(&dir, &s_ci(&paths, "m9aAppSettings"));
+        let inst_dir = join_rel(&dir, &s_ci(&paths, "m9aInstancesDir"));
+        let app = read_json_loose(&app_path).unwrap_or(json!({}));
+        let want = s_ci(&app, "Instances.LastActiveName");
+        let want_id = s_ci(&app, "Instances.LastActive");
+        let mut chosen: Option<String> = None;
+        let mut candidates = Vec::new();
+        let Ok(rd) = fs::read_dir(&inst_dir) else {
+            return Err("M9A 实例目录读不到，无法确定当前设备".to_string());
+        };
+        for item in rd.flatten() {
+            let p = item.path();
+            if p.extension().and_then(|x| x.to_str()).map(|x| x.eq_ignore_ascii_case("json")) != Some(true) { continue; }
+            let Some(v) = read_json_loose(&p) else { continue };
+            let id = p.file_stem().and_then(|x| x.to_str()).unwrap_or("").to_string();
+            let name = s_ci(&v, "InstanceName");
+            let dev = v.get("AdbDevice").cloned().unwrap_or(json!({}));
+            let serial = s_ci(&dev, "AdbSerial");
+            if !serial.is_empty() { candidates.push(serial.clone()); }
+            if m9a_instance_matches(&want_id, &want, &id, &name) {
+                chosen = Some(serial);
+                break;
+            }
+        }
+        let serial = chosen.filter(|x| !x.is_empty()).or_else(|| {
+            // 只有当前实例指针整体缺失时才允许唯一候选兜底；指针失效不能悄悄改摄其他实例。
+            if want.is_empty() && want_id.is_empty() && candidates.len() == 1 { candidates.first().cloned() } else { None }
+        }).ok_or_else(|| "当前 M9A 实例没有可用的 ADB 设备；请先在助手页选中并连接实例".to_string())?;
+        return Ok(CaptureTarget { process: String::new(), adb, serial });
+    }
+    Err("这条插件路没有实时画面通道".to_string())
+}
+
+fn m9a_instance_matches(want_id: &str, want_name: &str, id: &str, name: &str) -> bool {
+    // ID 是主身份。ID 一旦失效，不许借同名旧实例继续摄画面。
+    if !want_id.is_empty() {
+        id.eq_ignore_ascii_case(want_id)
+    } else {
+        !want_name.is_empty() && name.eq_ignore_ascii_case(want_name)
+    }
+}
+
+fn capture_adb_path(paths: &Value) -> PathBuf {
+    join_rel(&s_ci(paths, "mumuDir"), &s_ci(paths, "mumuAdb"))
 }
 
 fn m9a_state(root: &Path, settings: &Value) -> Value {
@@ -914,8 +1115,9 @@ fn m9a_state(root: &Path, settings: &Value) -> Value {
         json!({})
     };
 
+    let catalogs = m9a_catalogs(&dir);
     let (instances, current) = if inst_dir.is_dir() {
-        instances_now(&inst_dir.to_string_lossy(), &app)
+        instances_now(&inst_dir.to_string_lossy(), &app, &catalogs)
     } else {
         (Vec::new(), None)
     };
@@ -971,6 +1173,7 @@ fn m9a_state(root: &Path, settings: &Value) -> Value {
         "noAutoStart": s_ci(&app, "NoAutoStart"),
         "instances": instances,
         "current": current,
+        "catalogs": catalogs,
         "version": version,
         "conn": conn,
         "connError": conn_error,
@@ -988,6 +1191,667 @@ fn m9a_state(root: &Path, settings: &Value) -> Value {
             "takeOverAssistant": b_ci(&rt, "takeOverAssistant")
         }
     })
+}
+
+/* ── M9A 配置目录：候选只来自本机 interface / tasks / preset，不硬编码任务 ── */
+
+fn m9a_string_list(v: Option<&Value>) -> Vec<String> {
+    match v {
+        Some(Value::String(s)) if !s.is_empty() => vec![s.clone()],
+        Some(Value::Array(a)) => a.iter().filter_map(|x| x.as_str().map(String::from)).filter(|s| !s.is_empty()).collect(),
+        _ => Vec::new(),
+    }
+}
+
+fn m9a_localized(v: &Value, key: &str, locale: &Value) -> Option<String> {
+    let raw = v.get(key).and_then(|x| x.as_str())?;
+    if let Some(k) = raw.strip_prefix('$') {
+        locale.get(k).and_then(|x| x.as_str()).map(String::from)
+    } else if raw.is_empty() { None } else { Some(raw.to_string()) }
+}
+
+fn m9a_option_def(v: &Value, fallback_name: &str, locale: &Value) -> Value {
+    let cases = v.get("cases").and_then(|x| x.as_array()).map(|a| {
+        a.iter().filter_map(|c| {
+            let name = c.get("name").and_then(|x| x.as_str())?;
+            if name.is_empty() { return None; }
+            let mut out = json!({"name": name});
+            if let Some(label) = m9a_localized(c, "label", locale) { out["label"] = json!(label); }
+            if let Some(desc) = m9a_localized(c, "description", locale) { out["description"] = json!(desc); }
+            if let Some(children) = c.get("option").and_then(|x| x.as_array()) {
+                out["options"] = json!(children.iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>());
+            }
+            Some(out)
+        }).collect::<Vec<_>>()
+    }).unwrap_or_default();
+    let inputs = v.get("inputs").and_then(|x| x.as_array()).map(|a| {
+        a.iter().filter_map(|x| {
+            let name = x.get("name").and_then(|s| s.as_str())?;
+            if name.is_empty() { return None; }
+            let password = x.get("password").and_then(|s| s.as_bool()).unwrap_or(false);
+            let mut out = json!({
+                "name": name,
+                "default": if password { String::new() } else { x.get("default").and_then(|s| s.as_str()).unwrap_or("").to_string() },
+                "password": password
+            });
+            if let Some(label) = m9a_localized(x, "label", locale) { out["label"] = json!(label); }
+            Some(out)
+        }).collect::<Vec<_>>()
+    }).unwrap_or_default();
+    let default = v.get("default_case").cloned().unwrap_or(Value::Null);
+    let mut out = json!({
+        "name": fallback_name,
+        "type": v.get("type").and_then(|x| x.as_str()).unwrap_or("input"),
+        "cases": cases,
+        "inputs": inputs,
+        "defaultCase": default
+    });
+    if let Some(label) = m9a_localized(v, "label", locale) { out["label"] = json!(label); }
+    if let Some(desc) = m9a_localized(v, "description", locale) { out["description"] = json!(desc); }
+    out
+}
+
+fn m9a_collect_def(
+    defs: &serde_json::Map<String, Value>,
+    name: &str,
+    locale: &Value,
+    seen: &mut HashSet<String>,
+    out: &mut Vec<Value>,
+    depth: usize,
+) {
+    if depth > 16 || !seen.insert(name.to_string()) { return; }
+    let Some(raw) = defs.get(name) else { return; };
+    // interface/tasks 的 option 是「键名 -> 定义」，定义内部通常没有 name；身份必须取外层键。
+    let def = m9a_option_def(raw, name, locale);
+    let children: Vec<String> = def.get("cases").and_then(|x| x.as_array()).into_iter().flatten()
+        .flat_map(|c| c.get("options").and_then(|x| x.as_array()).cloned().unwrap_or_default())
+        .filter_map(|x| x.as_str().map(String::from)).collect();
+    out.push(def);
+    for child in children { m9a_collect_def(defs, &child, locale, seen, out, depth + 1); }
+}
+
+fn m9a_defs_from_names(defs: &serde_json::Map<String, Value>, names: &[String], locale: &Value) -> Vec<Value> {
+    // task[].option 只列直接父项；case.option 引用的子项要按定义图递归展开。
+    let mut out = Vec::new();
+    let mut seen = HashSet::new();
+    for name in names { m9a_collect_def(defs, name, locale, &mut seen, &mut out, 0); }
+    out
+}
+
+fn m9a_named_defs(catalogs: &Value, group: &str, name: &str) -> Vec<Value> {
+    catalogs.get(group).and_then(|x| x.get(name)).and_then(|x| x.as_array()).cloned().unwrap_or_default()
+}
+
+fn m9a_task_defs(catalogs: &Value, name: &str) -> Vec<Value> {
+    catalogs.get("tasks").and_then(|x| x.as_array())
+        .and_then(|a| a.iter().find(|t| t.get("name").and_then(|x| x.as_str()) == Some(name)))
+        .and_then(|t| t.get("options")).and_then(|x| x.as_array()).cloned().unwrap_or_default()
+}
+
+/// 只回面板需要的选择字段；input 仅回非密码现值，密码/未知数据一律不离开 Rust。
+fn m9a_safe_nodes(raw: Option<&Value>, defs: &[Value]) -> Vec<Value> {
+    let Some(arr) = raw.and_then(|x| x.as_array()) else { return Vec::new() };
+    arr.iter().filter_map(|node| {
+        let name = node.get("name").and_then(|x| x.as_str())?;
+        let def = defs.iter().find(|d| d.get("name").and_then(|x| x.as_str()) == Some(name))?;
+        let mut out = json!({"name": name});
+        if let Some(i) = node.get("index").and_then(|x| x.as_i64()) { out["index"] = json!(i); }
+        if let Some(s) = node.get("selected_case").and_then(|x| x.as_str()) { out["selected_case"] = json!(s); }
+        if let Some(cs) = node.get("selected_cases") {
+            out["selected_cases"] = json!(m9a_string_list(Some(cs)));
+        }
+        let ty = def.get("type").and_then(|x| x.as_str()).unwrap_or("");
+        if ty == "input" || ty == "hotkey" {
+            let mut data = serde_json::Map::new();
+            if let Some(saved) = node.get("data").and_then(|x| x.as_object()) {
+                for input in def.get("inputs").and_then(|x| x.as_array()).into_iter().flatten() {
+                    if input.get("password").and_then(|x| x.as_bool()).unwrap_or(false) { continue; }
+                    let key = input.get("name").and_then(|x| x.as_str()).unwrap_or("");
+                    if let Some(v) = saved.get(key).and_then(|x| x.as_str()) { data.insert(key.to_string(), json!(v)); }
+                }
+            }
+            if !data.is_empty() { out["data"] = Value::Object(data); }
+        }
+        // 子选项定义要从同一份目录取；安全节点递归时只保留当前激活分支。
+        if let Some(children) = m9a_active_child_defs_with(def, node, defs) {
+            if !children.is_empty() {
+                let safe = m9a_safe_nodes(node.get("sub_options"), &children);
+                if !safe.is_empty() { out["sub_options"] = json!(safe); }
+            }
+        }
+        Some(out)
+    }).collect()
+}
+
+fn m9a_materialize_active_selection(node: &mut Value, def: &Value) {
+    let Some(obj) = node.as_object_mut() else { return; };
+    let ty = def.get("type").and_then(|x| x.as_str()).unwrap_or("");
+    if ty == "checkbox" {
+        if obj.keys().any(|k| k.eq_ignore_ascii_case("selected_cases")) { return; }
+        let selected: Vec<String> = m9a_string_list(def.get("defaultCase")).into_iter()
+            .filter(|n| m9a_case_index(def, n).is_some()).collect();
+        obj.insert("selected_cases".to_string(), json!(selected));
+    } else if ty == "switch" || ty == "select" {
+        if obj.keys().any(|k| k.eq_ignore_ascii_case("selected_case") || k.eq_ignore_ascii_case("index")) { return; }
+        let all = def.get("cases").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+        let selected = def.get("defaultCase").and_then(|x| x.as_str())
+            .or_else(|| all.first().and_then(|c| c.get("name")).and_then(|x| x.as_str()));
+        if let Some(name) = selected {
+            if let Some(idx) = m9a_case_index(def, name) {
+                obj.insert("index".to_string(), json!(idx));
+                obj.insert("selected_case".to_string(), json!(name));
+            }
+        }
+    }
+}
+
+fn m9a_active_child_defs_with(def: &Value, node: &Value, defs: &[Value]) -> Option<Vec<Value>> {
+    let all = def.get("cases").and_then(|x| x.as_array())?;
+    let ty = def.get("type").and_then(|x| x.as_str()).unwrap_or("");
+    let selected: Vec<String> = if ty == "checkbox" {
+        if node.get("selected_cases").is_some() { m9a_string_list(node.get("selected_cases")) }
+        else { m9a_string_list(def.get("defaultCase")) }
+    } else if ty == "switch" || ty == "select" {
+        let name = node.get("selected_case").and_then(|x| x.as_str()).map(String::from)
+            .or_else(|| node.get("index").and_then(|x| x.as_u64()).and_then(|i| all.get(i as usize)).and_then(|c| c.get("name")).and_then(|x| x.as_str()).map(String::from));
+        match name {
+            Some(n) => vec![n],
+            None => match def.get("defaultCase") {
+                Some(Value::String(s)) => vec![s.clone()],
+                _ => all.first().and_then(|c| c.get("name")).and_then(|x| x.as_str()).map(|s| vec![s.to_string()]).unwrap_or_default(),
+            }
+        }
+    } else { Vec::new() };
+    let names: Vec<String> = selected.iter().flat_map(|n| {
+        all.iter().find(|c| c.get("name").and_then(|x| x.as_str()) == Some(n))
+            .and_then(|c| c.get("options")).and_then(|x| x.as_array()).cloned().unwrap_or_default()
+            .into_iter().filter_map(|x| x.as_str().map(String::from)).collect::<Vec<_>>()
+    }).collect();
+    Some(names.iter().filter_map(|n| defs.iter().find(|d| d.get("name").and_then(|x| x.as_str()) == Some(n)).cloned()).collect())
+}
+
+fn m9a_safe_task_items(raw: Option<&Value>, catalogs: &Value) -> Vec<Value> {
+    raw.and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|item| {
+        let name = item.get("name").and_then(|x| x.as_str())?;
+        let mut out = json!({"name": name});
+        if let Some(entry) = item.get("entry").and_then(|x| x.as_str()) { out["entry"] = json!(entry); }
+        let opts = m9a_safe_nodes(item.get("option"), &m9a_task_defs(catalogs, name));
+        if !opts.is_empty() { out["option"] = json!(opts); }
+        Some(out)
+    }).collect()).unwrap_or_default()
+}
+
+fn m9a_catalogs(dir: &str) -> Value {
+    let empty = json!({"resources":[],"controllers":[],"presets":[],"tasks":[],
+        "resourceOptions":{},"controllerOptions":{},"globalOptions":[]});
+    if dir.is_empty() { return empty; }
+    let base = Path::new(dir);
+    let interface = read_json_loose(&base.join("interface.json")).unwrap_or(json!({}));
+    let locale_path = interface.get("languages").and_then(|x| x.get("zh_cn")).and_then(|x| x.as_str()).unwrap_or("locales/zh_cn.json");
+    let locale = read_json_loose(&base.join(locale_path)).unwrap_or(json!({}));
+    let mut defs: serde_json::Map<String, Value> = interface.get("option").and_then(|x| x.as_object()).cloned().unwrap_or_default();
+    let mut task_specs: Vec<(String, String, Vec<String>)> = Vec::new();
+    if let Ok(rd) = fs::read_dir(base.join("tasks")) {
+        for e in rd.filter_map(|x| x.ok()) {
+            let p = e.path();
+            if !p.extension().and_then(|x| x.to_str()).map(|x| x.eq_ignore_ascii_case("json")).unwrap_or(false) { continue; }
+            let Some(v) = read_json_loose(&p) else { continue; };
+            if let Some(o) = v.get("option").and_then(|x| x.as_object()) {
+                for (k, val) in o { defs.entry(k.clone()).or_insert_with(|| val.clone()); }
+            }
+            if let Some(tasks) = v.get("task").and_then(|x| x.as_array()) {
+                for t in tasks {
+                    let name = t.get("name").and_then(|x| x.as_str()).unwrap_or("");
+                    let entry = t.get("entry").and_then(|x| x.as_str()).unwrap_or("");
+                    if name.is_empty() || entry.is_empty() { continue; }
+                    let names = m9a_string_list(t.get("option"));
+                    task_specs.push((name.to_string(), entry.to_string(), names));
+                }
+            }
+        }
+    }
+    // 资源附带 interface.json 里的选项定义（当前官服为空，但升级资源后可直接跟随）。
+    if let Ok(rd) = fs::read_dir(base.join("resource")) {
+        for e in rd.filter_map(|x| x.ok()) {
+            let p = e.path().join("interface.json");
+            if let Some(v) = read_json_loose(&p) {
+                if let Some(o) = v.get("option").and_then(|x| x.as_object()) {
+                    for (k, val) in o { defs.entry(k.clone()).or_insert_with(|| val.clone()); }
+                }
+            }
+        }
+    }
+    // 所有任务文件都可能定义别的任务要引用的选项；先并完定义图，再生成每个任务的闭包。
+    let mut task_rows: Vec<Value> = task_specs.into_iter().map(|(name, entry, names)| {
+        json!({"name": name, "entry": entry, "options": m9a_defs_from_names(&defs, &names, &locale)})
+    }).collect();
+    let resources: Vec<Value> = interface.get("resource").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|r| {
+        let name = r.get("name").and_then(|x| x.as_str())?;
+        let names = m9a_string_list(r.get("option"));
+        Some(json!({"name": name, "controllers": m9a_string_list(r.get("controller")),
+            "options": m9a_defs_from_names(&defs, &names, &locale)}))
+    }).collect()).unwrap_or_default();
+    let mut resource_options = serde_json::Map::new();
+    for r in &resources {
+        let name = r.get("name").and_then(|x| x.as_str()).unwrap_or("");
+        resource_options.insert(name.to_string(), r.get("options").cloned().unwrap_or(json!([])));
+    }
+    let controllers: Vec<Value> = interface.get("controller").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|c| {
+        let name = c.get("name").and_then(|x| x.as_str())?;
+        let names = m9a_string_list(c.get("option"));
+        Some(json!({"name": name, "options": m9a_defs_from_names(&defs, &names, &locale)}))
+    }).collect()).unwrap_or_default();
+    let mut controller_options = serde_json::Map::new();
+    for c in &controllers {
+        let name = c.get("name").and_then(|x| x.as_str()).unwrap_or("");
+        controller_options.insert(name.to_string(), c.get("options").cloned().unwrap_or(json!([])));
+    }
+    let global_names = m9a_string_list(interface.get("global_option"));
+    let mut presets: Vec<Value> = Vec::new();
+    if let Ok(rd) = fs::read_dir(base.join("tasks").join("preset")) {
+        for e in rd.filter_map(|x| x.ok()) {
+            let p = e.path();
+            if !p.extension().and_then(|x| x.to_str()).map(|x| x.eq_ignore_ascii_case("json")).unwrap_or(false) { continue; }
+            let Some(v) = read_json_loose(&p) else { continue; };
+            for p in v.get("preset").and_then(|x| x.as_array()).into_iter().flatten() {
+                let name = p.get("name").and_then(|x| x.as_str()).unwrap_or("");
+                if name.is_empty() { continue; }
+                let tasks: Vec<String> = p.get("task").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|t| {
+                    if t.get("enabled").and_then(|x| x.as_bool()) == Some(false) { return None; }
+                    t.get("name").and_then(|x| x.as_str()).map(String::from)
+                }).collect()).unwrap_or_default();
+                presets.push(json!({"name": name, "tasks": tasks}));
+            }
+        }
+    }
+    task_rows.sort_by(|a, b| a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or("")));
+    presets.sort_by(|a, b| a["name"].as_str().unwrap_or("").cmp(b["name"].as_str().unwrap_or("")));
+    json!({
+        "resources": resources.iter().map(|r| json!({"name": r["name"], "controllers": r["controllers"]})).collect::<Vec<_>>(),
+        "controllers": controllers.iter().map(|c| c["name"].clone()).collect::<Vec<_>>(),
+        "presets": presets,
+        "tasks": task_rows,
+        "resourceOptions": resource_options,
+        "controllerOptions": controller_options,
+        "globalOptions": m9a_defs_from_names(&defs, &global_names, &locale)
+    })
+}
+
+/* ══ M9A 实例配置：白名单原位改写 ══ */
+
+fn m9a_ci_key(obj: &serde_json::Map<String, Value>, key: &str) -> Option<String> {
+    if obj.contains_key(key) { return Some(key.to_string()); }
+    obj.keys().find(|k| k.eq_ignore_ascii_case(key)).cloned()
+}
+
+fn m9a_set_key(obj: &mut serde_json::Map<String, Value>, key: &str, val: Value) -> Result<(), String> {
+    let actual = m9a_ci_key(obj, key).ok_or_else(|| format!("实例文件里没有 {key}（老配置？请先用 M9A 保存一次）"))?;
+    obj.insert(actual, val);
+    Ok(())
+}
+
+fn m9a_remove_keys(obj: &mut serde_json::Map<String, Value>, keys: &[&str]) {
+    let victims: Vec<String> = obj.keys().filter(|k| keys.iter().any(|want| k.eq_ignore_ascii_case(want))).cloned().collect();
+    for k in victims { obj.remove(&k); }
+}
+
+fn m9a_history_parts(key: &str) -> Option<(String, String)> {
+    if key.len() > 512 || key.chars().any(|c| c.is_control()) { return None; }
+    if key.matches("<|||>").count() == 1 {
+        let (name, entry) = key.split_once("<|||>")?;
+        return if !name.is_empty() && !entry.is_empty() { Some((name.to_string(), entry.to_string())) } else { None };
+    }
+    // 反编译真身只认恰好一个冒号的旧格式；带新分隔符但写法歧义时不猜。
+    if key.contains('<') || key.matches(':').count() != 1 { return None; }
+    let (name, entry) = key.split_once(':')?;
+    if !name.is_empty() && !entry.is_empty() { Some((name.to_string(), entry.to_string())) } else { None }
+}
+
+fn m9a_catalog_task<'a>(catalogs: &'a Value, name: &str, entry: &str) -> Option<&'a Value> {
+    catalogs.get("tasks")?.as_array()?.iter().find(|t| {
+        t.get("name").and_then(|x| x.as_str()) == Some(name) && t.get("entry").and_then(|x| x.as_str()) == Some(entry)
+    })
+}
+
+fn m9a_case_index(def: &Value, name: &str) -> Option<usize> {
+    def.get("cases")?.as_array()?.iter().position(|c| c.get("name").and_then(|x| x.as_str()) == Some(name))
+}
+
+fn m9a_apply_selection(node: &mut Value, def: &Value, one: Option<&Value>, many: Option<&Value>) -> Result<(), String> {
+    let obj = node.as_object_mut().ok_or_else(|| "选项节点不是对象".to_string())?;
+    let name = def.get("name").and_then(|x| x.as_str()).unwrap_or("");
+    let ty = def.get("type").and_then(|x| x.as_str()).unwrap_or("");
+    match ty {
+        "switch" | "select" => {
+            let selected = one.and_then(|x| x.as_str()).ok_or_else(|| format!("{name}：只收一个 case 名"))?;
+            let idx = m9a_case_index(def, selected).ok_or_else(|| format!("{name}：候选里没有 {selected}"))?;
+            m9a_remove_keys(obj, &["selected_cases"]);
+            obj.insert("index".to_string(), json!(idx));
+            obj.insert("selected_case".to_string(), json!(selected));
+        }
+        "checkbox" => {
+            let arr = many.and_then(|x| x.as_array()).ok_or_else(|| format!("{name}：复选框只收 case 名数组"))?;
+            if arr.len() > 256 { return Err(format!("{name}：候选太多")); }
+            let mut selected = Vec::new();
+            for x in arr {
+                let s = x.as_str().ok_or_else(|| format!("{name}：case 名只能是文本"))?;
+                if m9a_case_index(def, s).is_none() { return Err(format!("{name}：候选里没有 {s}")); }
+                if !selected.iter().any(|v| v == s) { selected.push(s.to_string()); }
+            }
+            m9a_remove_keys(obj, &["index", "selected_case"]);
+            obj.insert("selected_cases".to_string(), json!(selected));
+        }
+        _ => return Err(format!("{name}：自由输入/未知类型不归面板编辑")),
+    }
+    Ok(())
+}
+
+fn m9a_upsert_node<'a>(arr: &'a mut Vec<Value>, name: &str) -> &'a mut Value {
+    if let Some(i) = arr.iter().position(|n| n.get("name").and_then(|x| x.as_str()) == Some(name)) { return &mut arr[i]; }
+    arr.push(json!({"name": name}));
+    arr.last_mut().expect("just pushed")
+}
+
+fn m9a_apply_option_path(
+    arr: &mut Vec<Value>,
+    defs: &[Value],
+    path: &[String],
+    one: Option<&Value>,
+    many: Option<&Value>,
+) -> Result<(), String> {
+    let first = path.first().ok_or_else(|| "选项路径是空的".to_string())?;
+    let def = defs.iter().find(|d| d.get("name").and_then(|x| x.as_str()) == Some(first.as_str()))
+        .ok_or_else(|| format!("目录里没有选项定义：{first}"))?;
+    let node = m9a_upsert_node(arr, first);
+    if path.len() == 1 {
+        return m9a_apply_selection(node, def, one, many);
+    }
+    // 面板允许按显示出的默认分支直接改子项；落盘时把父项的有效默认选择显式物化。
+    m9a_materialize_active_selection(node, def);
+    let active = m9a_active_child_defs_with(def, node, defs).unwrap_or_default();
+    let second = &path[1];
+    if !active.iter().any(|d| d.get("name").and_then(|x| x.as_str()) == Some(second.as_str())) {
+        return Err(format!("{first}：当前 case 没有激活子选项 {second}（先改父选项，再改子项）"));
+    }
+    let mut children = node.get("sub_options").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+    m9a_apply_option_path(&mut children, defs, &path[1..], one, many)?;
+    node.as_object_mut().ok_or_else(|| "选项节点不是对象".to_string())?.insert("sub_options".to_string(), Value::Array(children));
+    Ok(())
+}
+
+fn m9a_pretty(v: &Value, indent: &str, level: usize, nl: &str) -> String {
+    match v {
+        Value::Array(a) => {
+            if a.is_empty() { return "[]".to_string(); }
+            let pad = format!("{}{}", indent.repeat(level + 1), "");
+            let mut s = String::from("[");
+            s.push_str(nl);
+            for (i, x) in a.iter().enumerate() {
+                s.push_str(&pad);
+                s.push_str(&m9a_pretty(x, indent, level + 1, nl));
+                if i + 1 < a.len() { s.push(','); }
+                s.push_str(nl);
+            }
+            s.push_str(&indent.repeat(level));
+            s.push(']');
+            s
+        }
+        Value::Object(o) => {
+            if o.is_empty() { return "{}".to_string(); }
+            let pad = format!("{}  ", indent.repeat(level));
+            let mut s = String::from("{");
+            s.push_str(nl);
+            for (i, (k, x)) in o.iter().enumerate() {
+                s.push_str(&pad);
+                s.push_str(&serde_json::to_string(k).unwrap_or_default());
+                s.push_str(": ");
+                s.push_str(&m9a_pretty(x, indent, level + 1, nl));
+                if i + 1 < o.len() { s.push(','); }
+                s.push_str(nl);
+            }
+            s.push_str(&indent.repeat(level));
+            s.push('}');
+            s
+        }
+        _ => serde_json::to_string(v).unwrap_or_default(),
+    }
+}
+
+fn m9a_format_value(v: &Value, original: &str, indent: &str) -> String {
+    // 原值是单行就保持单行；原值跨行才按原行尾展开，避免往 CRLF 文件塞裸 LF。
+    if (v.is_array() || v.is_object()) && original.contains('\n') {
+        let nl = if original.contains("\r\n") { "\r\n" } else { "\n" };
+        m9a_pretty(v, indent, 0, nl)
+    } else {
+        serde_json::to_string(v).unwrap_or_default()
+    }
+}
+
+fn m9a_controller_value(name: &str) -> Result<u32, String> {
+    match name.to_ascii_lowercase().as_str() {
+        "none" => Ok(0),
+        "win32" | "pc" => Ok(1),
+        "adb" => Ok(2),
+        "playcover" => Ok(4),
+        "gamepad" => Ok(8),
+        "macos" => Ok(16),
+        "wlroots" => Ok(32),
+        _ => Err(format!("控制器候选里没有 {name}")),
+    }
+}
+
+/// 纯函数：只接受已由前端限定的 patch；整份 before == after 才允许落盘。
+fn apply_m9a_instance_patch(
+    text: &str,
+    expected_name: &str,
+    patch: &Value,
+    catalogs: &Value,
+) -> Result<(String, Vec<String>), String> {
+    let before: Value = serde_json::from_str(text).map_err(|e| format!("实例配置解析失败：{e}"))?;
+    if !before.is_object() { return Err("实例配置根节点不是对象".to_string()); }
+    if s_ci(&before, "InstanceName") != expected_name { return Err("实例名已经变了：刷新后再编辑".to_string()); }
+    let p = patch.as_object().ok_or_else(|| "保存内容不是对象".to_string())?;
+    if let Some(name) = p.get("name").and_then(|x| x.as_str()) {
+        if name != expected_name { return Err("保存身份与当前实例名不一致：刷新后再编辑".to_string()); }
+    }
+    for k in p.keys() {
+        if !matches!(k.as_str(), "name" | "resource" | "controller" | "preset" | "currentTasks" | "optionEdits") {
+            return Err(format!("这个字段不归面板改：{k}"));
+        }
+    }
+    let mut after = before.clone();
+    let mut changed: Vec<String> = Vec::new();
+    let old_current = strs(ci(&before, "CurrentTasks"));
+
+    if let Some(v) = p.get("resource") {
+        let name = v.as_str().ok_or_else(|| "资源只收候选名".to_string())?;
+        let ok = catalogs.get("resources").and_then(|x| x.as_array()).map(|a| a.iter().any(|r| r.get("name").and_then(|x| x.as_str()) == Some(name))).unwrap_or(false);
+        if !ok { return Err(format!("资源候选里没有 {name}")); }
+        m9a_set_key(after.as_object_mut().unwrap(), "Resource", json!(name))?;
+        changed.push("Resource".to_string());
+    }
+    if let Some(v) = p.get("controller") {
+        let name = v.as_str().ok_or_else(|| "控制器只收候选名".to_string())?;
+        let ok = catalogs.get("controllers").and_then(|x| x.as_array()).map(|a| a.iter().any(|c| c.as_str() == Some(name))).unwrap_or(false);
+        if !ok { return Err(format!("控制器候选里没有 {name}")); }
+        let num = m9a_controller_value(name)?;
+        let obj = after.as_object_mut().unwrap();
+        m9a_set_key(obj, "CurrentControllerName", json!(name))?;
+        m9a_set_key(obj, "CurrentController", json!(num))?;
+        changed.extend(["CurrentControllerName".to_string(), "CurrentController".to_string()]);
+    }
+    let resource = s_ci(&after, "Resource");
+    let controller = s_ci(&after, "CurrentControllerName");
+    if !resource.is_empty() && !controller.is_empty() {
+        if let Some(r) = catalogs.get("resources").and_then(|x| x.as_array()).and_then(|a| a.iter().find(|r| r.get("name").and_then(|x| x.as_str()) == Some(&resource))) {
+            let supported = m9a_string_list(r.get("controllers"));
+            if !supported.is_empty() && !supported.iter().any(|x| x.eq_ignore_ascii_case(&controller)) {
+                return Err(format!("资源 {resource} 不支持控制器 {controller}"));
+            }
+        }
+    }
+    if let Some(v) = p.get("preset") {
+        let name = v.as_str().ok_or_else(|| "预设只收候选名".to_string())?;
+        if !name.is_empty() {
+            let ok = catalogs.get("presets").and_then(|x| x.as_array()).map(|a| a.iter().any(|x| x.get("name").and_then(|n| n.as_str()) == Some(name))).unwrap_or(false);
+            if !ok { return Err(format!("预设候选里没有 {name}")); }
+        }
+        m9a_set_key(after.as_object_mut().unwrap(), "InstancePresetKey", json!(name))?;
+        changed.push("InstancePresetKey".to_string());
+    }
+
+    let current = if let Some(v) = p.get("currentTasks") {
+        let arr = v.as_array().ok_or_else(|| "任务队列只收字符串数组".to_string())?;
+        if arr.len() > 512 { return Err("任务队列最多 512 项".to_string()); }
+        let mut out: Vec<String> = Vec::new();
+        let mut selected_names: Vec<String> = Vec::new();
+        for x in arr {
+            let key = x.as_str().ok_or_else(|| "任务队列里只能放文本".to_string())?;
+            let parts = m9a_history_parts(key).ok_or_else(|| "任务历史格式有歧义：只认 名称<|||>entry 或恰好一个冒号的旧格式".to_string())?;
+            if m9a_catalog_task(catalogs, &parts.0, &parts.1).is_some() {
+                if !selected_names.iter().any(|n| n == &parts.0) { selected_names.push(parts.0.clone()); }
+                out.push(format!("{}<|||>{}", parts.0, parts.1));
+            } else if old_current.iter().any(|old| old == key) {
+                // 已存在但目录里没有的旧任务原样保留；不允许借保存新增未知任务。
+                if let Some((n, _)) = m9a_history_parts(key) { if !selected_names.iter().any(|x| x == &n) { selected_names.push(n); } }
+                out.push(format!("{}<|||>{}", parts.0, parts.1));
+            } else {
+                return Err(format!("目录里没有这个任务：{}{}", parts.0, if parts.1.is_empty() { "" } else { " / " }));
+            }
+        }
+        let obj = after.as_object_mut().unwrap();
+        m9a_set_key(obj, "CurrentTasks", Value::Array(out.iter().map(|s| json!(s)).collect()))?;
+        let known: Vec<String> = catalogs.get("tasks").and_then(|x| x.as_array()).map(|a| a.iter().filter_map(|t| t.get("name").and_then(|x| x.as_str()).map(String::from)).collect()).unwrap_or_default();
+        let mut deleted = strs(ci(&before, "DeletedTaskNames"));
+        deleted.retain(|n| !known.iter().any(|k| k == n));
+        for n in &known { if !selected_names.iter().any(|s| s == n) && !deleted.iter().any(|d| d == n) { deleted.push(n.clone()); } }
+        m9a_set_key(obj, "DeletedTaskNames", json!(deleted))?;
+        let mut missing = ci(&before, "MissingTaskSessions").and_then(|x| x.as_object()).cloned().unwrap_or_default();
+        let victims: Vec<String> = missing.keys().filter(|k| known.iter().any(|n| n == *k)).cloned().collect();
+        for k in victims { missing.remove(&k); }
+        m9a_set_key(obj, "MissingTaskSessions", Value::Object(missing))?;
+        m9a_set_key(obj, "KeepEmptyTaskQueue", json!(out.is_empty()))?;
+        changed.extend(["CurrentTasks".to_string(), "DeletedTaskNames".to_string(), "MissingTaskSessions".to_string(), "KeepEmptyTaskQueue".to_string()]);
+        out
+    } else { old_current.clone() };
+
+    if let Some(v) = p.get("optionEdits") {
+        let edits = v.as_array().ok_or_else(|| "选项改动只收数组".to_string())?;
+        if edits.len() > 512 { return Err("一次最多改 512 个选项".to_string()); }
+        for e in edits {
+            let source = e.get("source").and_then(|x| x.as_str()).unwrap_or("");
+            let path: Vec<String> = e.get("path").and_then(|x| x.as_array()).ok_or_else(|| "选项改动缺 path".to_string())?
+                .iter().map(|x| x.as_str().map(String::from).ok_or_else(|| "选项路径只能放文本".to_string())).collect::<Result<_, _>>()?;
+            if path.is_empty() || path.len() > 16 { return Err("选项路径层数不合法".to_string()); }
+            let one = e.get("selected_case");
+            let many = e.get("selected_cases");
+            match source {
+                "task" => {
+                    let idx = e.get("task").and_then(|x| x.as_u64()).ok_or_else(|| "任务选项缺 task 下标".to_string())? as usize;
+                    let key = current.get(idx).ok_or_else(|| "任务选项下标越界（队列刚变过？）")?;
+                    let (name, _) = m9a_history_parts(key).ok_or_else(|| "当前任务历史格式不认识".to_string())?;
+                    let defs = m9a_task_defs(catalogs, &name);
+                    let mut items = ci(&after, "TaskItems").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+                    if !items.iter().any(|it| it.get("name").and_then(|x| x.as_str()) == Some(&name)) {
+                        items.push(json!({"name": name}));
+                    }
+                    let item = items.iter_mut().find(|it| it.get("name").and_then(|x| x.as_str()) == Some(&name)).unwrap();
+                    let mut nodes = item.get("option").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+                    m9a_apply_option_path(&mut nodes, &defs, &path, one, many)?;
+                    item.as_object_mut().unwrap().insert("option".to_string(), Value::Array(nodes));
+                    m9a_set_key(after.as_object_mut().unwrap(), "TaskItems", Value::Array(items))?;
+                }
+                "resource" | "controller" => {
+                    let root_key = if source == "resource" { "ResourceOptionItems" } else { "ControllerOptionItems" };
+                    let scope = if source == "resource" { &resource } else { &controller };
+                    if scope.is_empty() { return Err(format!("当前没有可编辑的{}", source)); }
+                    let defs = m9a_named_defs(catalogs, if source == "resource" { "resourceOptions" } else { "controllerOptions" }, scope);
+                    let mut groups = ci(&after, root_key).and_then(|x| x.as_object()).cloned().unwrap_or_default();
+                    let mut nodes = groups.get(scope).and_then(|x| x.as_array()).cloned().unwrap_or_default();
+                    m9a_apply_option_path(&mut nodes, &defs, &path, one, many)?;
+                    groups.insert(scope.clone(), Value::Array(nodes));
+                    m9a_set_key(after.as_object_mut().unwrap(), root_key, Value::Object(groups))?;
+                }
+                "global" => {
+                    let defs = catalogs.get("globalOptions").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+                    let mut nodes = ci(&after, "GlobalOptionItems").and_then(|x| x.as_array()).cloned().unwrap_or_default();
+                    m9a_apply_option_path(&mut nodes, &defs, &path, one, many)?;
+                    m9a_set_key(after.as_object_mut().unwrap(), "GlobalOptionItems", Value::Array(nodes))?;
+                }
+                _ => return Err("选项来源只收 task/resource/controller/global".to_string()),
+            }
+            let label = if source == "task" { format!("TaskItems[{}]{}", e.get("task").and_then(|x| x.as_u64()).unwrap_or(0), path.join(".")) } else { format!("{source}:{}", path.join(".")) };
+            if !changed.iter().any(|x| x == &label) { changed.push(label); }
+        }
+    }
+    if after == before { return Ok((text.to_string(), Vec::new())); }
+    let top = root_object_start(text).ok_or_else(|| "定位不到实例配置根对象".to_string())?;
+    let mut plans: Vec<(usize, usize, String)> = Vec::new();
+    let mut planned_roots: Vec<String> = Vec::new();
+    for key in &changed {
+        let root_key = if key.starts_with("TaskItems") { "TaskItems" }
+            else if key.starts_with("resource:") { "ResourceOptionItems" }
+            else if key.starts_with("controller:") { "ControllerOptionItems" }
+            else if key.starts_with("global:") { "GlobalOptionItems" }
+            else { key.as_str() };
+        if planned_roots.iter().any(|k| k == root_key) { continue; }
+        planned_roots.push(root_key.to_string());
+        let val = ci(&after, root_key).ok_or_else(|| format!("改后缺少 {root_key}"))?;
+        let (vs, ve) = member_span(text, top, root_key).ok_or_else(|| format!("定位不到 {root_key}，面板不敢改"))?;
+        plans.push((vs, ve, m9a_format_value(val, &text[vs..ve], &line_indent(&text, vs))));
+    }
+    let mut out = text.to_string();
+    plans.sort_by(|a, b| b.0.cmp(&a.0));
+    for (vs, ve, rep) in plans { out.replace_range(vs..ve, &rep); }
+    let got: Value = serde_json::from_str(&out).map_err(|e| format!("改后的实例配置解析失败（{e}），文件未动"))?;
+    if got != after { return Err("改后文本与预期配置不一致，文件未动".to_string()); }
+    Ok((out, changed))
+}
+
+pub fn m9a_save_instance(id: String, name: String, patch: Value) -> Result<Value, String> {
+    let _write_guard = write_lock(&SETTINGS_WRITE_LOCK)?;
+    let id = id.trim().to_string();
+    let name = name.trim().to_string();
+    if id.is_empty() || id.len() > 64 || !id.chars().all(|c| c.is_ascii_alphanumeric() || c == '-' || c == '_') {
+        return Err("实例 id 不合法（实例文件名只收字母数字、- 与 _）".to_string());
+    }
+    if name.is_empty() || name.chars().count() > 64 || name.chars().any(|c| c.is_control()) {
+        return Err("实例名不合法".to_string());
+    }
+    let root = root()?;
+    let settings = read_settings(&root)?.ok_or_else(|| "config/settings.json 不在：先跑 setup.ps1".to_string())?;
+    let paths = ci(&settings, "paths").cloned().unwrap_or(json!({}));
+    let dir = s_ci(&paths, "m9aDir");
+    if dir.is_empty() { return Err("settings.paths.m9aDir 没配".to_string()); }
+    let exe_name = stem(&s_ci(&paths, "m9aExe"));
+    if !exe_name.is_empty() && crate::live::any_running(&[exe_name.as_str()]) {
+        return Err("M9A 正在运行：先退出 M9A 再保存（它退出时会按内存回写整份配置）".to_string());
+    }
+    let inst_dir = join_rel(&dir, &s_ci(&paths, "m9aInstancesDir"));
+    let path = inst_dir.join(format!("{id}.json"));
+    if !path.is_file() { return Err("实例文件不在：刷新后再试".to_string()); }
+    let raw = fs::read(&path).map_err(|e| scrub(&format!("读实例配置失败：{e}")))?;
+    let had_bom = raw.starts_with(&[0xEF, 0xBB, 0xBF]);
+    let body = if had_bom { &raw[3..] } else { &raw[..] };
+    let text = std::str::from_utf8(body).map_err(|_| "实例配置不是 UTF-8".to_string())?.to_string();
+    let catalogs = m9a_catalogs(&dir);
+    let (out, changed) = apply_m9a_instance_patch(&text, &name, &patch, &catalogs)?;
+    if changed.is_empty() { return Ok(json!({"ok": true, "changed": [], "note": "跟文件里一致，没写盘"})); }
+
+    let backup = backup(&root, &path).ok_or_else(|| "写前备份失败：拒绝改写实例配置".to_string())?;
+    let mut bytes = Vec::new();
+    if had_bom { bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]); }
+    bytes.extend_from_slice(out.as_bytes());
+    fs::write(&path, &bytes).map_err(|e| scrub(&format!("写实例配置失败：{e}")))?;
+    let verify_raw = fs::read(&path).map_err(|e| scrub(&format!("写后回读失败：{e}")))?;
+    let verify_body = if verify_raw.starts_with(&[0xEF, 0xBB, 0xBF]) { &verify_raw[3..] } else { &verify_raw[..] };
+    let verify: Value = serde_json::from_slice(verify_body).map_err(|e| format!("写后配置解析失败：{e}"))?;
+    let expected: Value = serde_json::from_str(&out).map_err(|e| format!("写后预期解析失败：{e}"))?;
+    if verify != expected || verify_raw != bytes {
+        return Err("写盘后回读不一致：请从 backups/ 恢复上一份，并把改动交给 M9A 手动做".to_string());
+    }
+    Ok(json!({"ok": true, "changed": changed, "backup": backup,
+        "note": "已原位写入实例配置（任务队列四字段同步；只动白名单值，已回读对平）"}))
 }
 
 /* ══ 真操作（全部走核内 verb，本件不判） ══ */
@@ -1048,6 +1912,7 @@ pub fn mumu_stop() -> Result<Value, String> {
 }
 
 pub fn m9a_switch(id: String, name: String) -> Result<Value, String> {
+    let _write_guard = write_lock(&SETTINGS_WRITE_LOCK)?;
     let id = id.trim().to_string();
     let name = name.trim().to_string();
     if id.is_empty()
@@ -1119,6 +1984,14 @@ fn spec_for(path: &str) -> Option<Spec> {
         "ark.farmAppend" => ("ark", None, "farmAppend", Bool),
         "ark.farmMaxTimesPerRound" => ("ark", None, "farmMaxTimesPerRound", Int),
         "ark.alsoEnableMainFight" => ("ark", None, "alsoEnableMainFight", Bool),
+        "runtime.retryOnce" => ("runtime", None, "retryOnce", Bool),
+        "runtime.arkVisionRescue" => ("runtime", None, "arkVisionRescue", Bool),
+        "runtime.mumuVisionRescue" => ("runtime", None, "mumuVisionRescue", Bool),
+        "runtime.visionAllowReward" => ("runtime", None, "visionAllowReward", Bool),
+        "runtime.supervisor" => ("runtime", None, "supervisor", Bool),
+        "runtime.keepScreenOn" => ("runtime", None, "keepScreenOn", Bool),
+        "notify.toast" => ("notify", None, "toast", Bool),
+        "runtime.abortOnMaaStallWarning" => ("runtime", None, "abortOnMaaStallWarning", Bool),
         "runtime.quitAssistantAfter" => ("runtime", None, "quitAssistantAfter", Bool),
         "runtime.closeArknightsAfter" => ("runtime", None, "closeArknightsAfter", Bool),
         "runtime.launchArkFromHelper" => ("runtime", None, "launchArkFromHelper", Bool),
@@ -1360,8 +2233,13 @@ fn format_value(v: &Value, original: &str, indent: &str) -> String {
 }
 
 pub fn save_plan(edits: Vec<Value>) -> Result<Value, String> {
-    let root = root()?;
-    let path = settings_path(&root);
+    let _write_guard = write_lock(&SETTINGS_WRITE_LOCK)?;
+    save_plan_locked(&root()?, edits)
+}
+
+// 调用方必须持有 SETTINGS_WRITE_LOCK；从旧值读取到写后回读全程不能释放。
+fn save_plan_locked(root: &Path, edits: Vec<Value>) -> Result<Value, String> {
+    let path = settings_path(root);
     if !path.is_file() {
         return Err("config/settings.json 不在：先跑 setup.ps1 生成配置".to_string());
     }
@@ -1389,10 +2267,11 @@ pub fn save_plan(edits: Vec<Value>) -> Result<Value, String> {
         let spec = spec_for(&key).ok_or_else(|| format!("面板不改这个键：{key}"))?;
         let val = coerce(spec.kind, e.get("value").unwrap_or(&Value::Null))
             .map_err(|m| format!("{key}：{m}"))?;
-        if get_path(&before, &key).is_none() {
-            return Err(format!(
-                "settings.json 里没有 {key} 这一项（老配置？跑 setup.ps1 或手动补一行再回来）"
-            ));
+        let current = get_path(&before, &key).ok_or_else(|| {
+            format!("settings.json 里没有 {key} 这一项（老配置？跑 setup.ps1 或手动补一行再回来）")
+        })?;
+        if spec.kind == Kind::Bool && !current.is_boolean() {
+            return Err(format!("settings.json 里 {key} 不是布尔值；面板不猜默认值，也不覆盖"));
         }
         set_path(&mut after, &key, val.clone())?;
         let (vs, ve) = value_span(&text, &spec)
@@ -1419,7 +2298,7 @@ pub fn save_plan(edits: Vec<Value>) -> Result<Value, String> {
         return Err("改后的文本回读跟预期的新值对不上——面板不敢写，文件一个字节没动".to_string());
     }
 
-    let backup = backup(&root, &path);
+    let backup = backup(root, &path).ok_or_else(|| "写前备份失败：拒绝改写 settings.json".to_string())?;
     let mut bytes = Vec::new();
     if had_bom {
         bytes.extend_from_slice(&[0xEF, 0xBB, 0xBF]);
@@ -1427,7 +2306,7 @@ pub fn save_plan(edits: Vec<Value>) -> Result<Value, String> {
     bytes.extend_from_slice(out.as_bytes());
     fs::write(&path, &bytes).map_err(|e| format!("写 settings.json 失败：{e}"))?;
 
-    let verify = read_settings(&root)?.ok_or_else(|| "写完后 settings.json 不见了".to_string())?;
+    let verify = read_settings(root)?.ok_or_else(|| "写完后 settings.json 不见了".to_string())?;
     if verify != after {
         return Err("写盘后回读不一致：请从 backups/ 里把上一份拷回来，并把这一项手动改".to_string());
     }
@@ -1435,7 +2314,7 @@ pub fn save_plan(edits: Vec<Value>) -> Result<Value, String> {
     Ok(json!({
         "ok": true,
         "changed": changed,
-        "backup": backup.unwrap_or_default(),
+        "backup": backup,
         "note": "已写入 config/settings.json（只动这几项的值；其余字节原样）"
     }))
 }
@@ -1522,6 +2401,78 @@ mod selftest {
         assert!(spec_for("runtime.visionApiKey").is_none(), "Key 永不在白名单");
         assert!(spec_for("runtime.timeoutMinutes").is_none());
         assert!(spec_for("ark.keepQueuesEnabled").is_some());
+        for k in ["runtime.retryOnce", "runtime.arkVisionRescue", "runtime.mumuVisionRescue", "runtime.visionAllowReward", "runtime.supervisor", "runtime.keepScreenOn", "notify.toast", "runtime.abortOnMaaStallWarning"] {
+            assert!(spec_for(k).is_some(), "右栏开关必须在白名单：{k}");
+        }
+    }
+
+    #[test]
+    fn runtime_flags_never_guess_missing_or_wrong_types() {
+        let v = runtime_flags(&json!({
+            "runtime": {"retryOnce": true, "supervisor": null, "keepScreenOn": "true"},
+            "notify": {"toast": false}
+        }));
+        assert_eq!(v["retryOnce"], json!(true));
+        assert_eq!(v["notify.toast"], json!(false));
+        assert_eq!(v["supervisor"], Value::Null);
+        assert_eq!(v["keepScreenOn"], Value::Null);
+        assert_eq!(v["abortOnMaaStallWarning"], Value::Null);
+        let missing_section = runtime_flags(&json!({"runtime": {}}));
+        assert_eq!(missing_section["notify.toast"], Value::Null);
+    }
+
+    #[test]
+    fn starting_opers_keep_object_shape_and_reject_unknown_keys() {
+        assert!(check_new_value("StartingOpers", &json!([]), &json!([
+            {"Name": "缄默德克萨斯", "UseSupport": false},
+            {"Name": "令"}
+        ])).is_ok());
+        assert!(check_new_value("StartingOpers", &json!([]), &json!([
+            {"Name": "A", "UseSupport": "false"}
+        ])).is_err());
+        assert!(check_new_value("StartingOpers", &json!([]), &json!([
+            {"Name": "A", "Unknown": true}
+        ])).is_err());
+        assert!(check_new_value("StartingOpers", &json!([]), &json!(["A"])).is_err());
+        assert!(check_new_value("StartingOpers", &json!([]), &json!([
+            {"Name": "A"}, {"Name": "A", "UseSupport": true}
+        ])).is_err());
+    }
+
+    #[test]
+    fn blackflow_flags_and_animals_are_validated() {
+        let ok = |key: &str, value: &str| {
+            assert!(check_new_value(key, &json!("None"), &json!(value)).is_ok(), "{key}={value}");
+        };
+        ok("BlackFlowEnding", "Ending1");
+        ok("BlackFlowStartAnimal1", "FeatheredSerpent");
+        ok("BlackFlowStartAnimal2", "None");
+        ok("BlackFlowStartRewards", "None");
+        ok("BlackFlowStartRewards", "UnnumberedItem, Pegasus, BaiZe");
+        ok("BlackFlowStartRewards", "SerpentRewards");
+        assert!(check_new_value("BlackFlowEnding", &json!("Ending1"), &json!("Ending2")).is_err());
+        assert!(check_new_value("BlackFlowStartAnimal1", &json!("None"), &json!("Cat, Dog")).is_err());
+        assert!(check_new_value("BlackFlowStartRewards", &json!("None"), &json!("None, Pegasus")).is_err());
+        assert!(check_new_value("BlackFlowStartRewards", &json!("None"), &json!("Pegasus; BaiZe")).is_err());
+        assert!(check_new_value("BlackFlowStartRewards", &json!("None"), &json!("未知")).is_err());
+    }
+
+    #[test]
+    fn blackflow_priority_is_an_ordered_permutation() {
+        let good = json!([
+            "Pegasus", "SpaceLease", "ForestRide", "UnnumberedItem", "RegressionCompensation",
+            "SurveyAdvance", "NestParasitism", "Hippogriff", "Dragon", "Hydra", "BaiZe", "GoldenCrow"
+        ]);
+        assert!(check_new_value("BlackFlowStartRewardPriority", &json!([]), &good).is_ok());
+        let mut short = good.as_array().unwrap().clone();
+        short.pop();
+        assert!(check_new_value("BlackFlowStartRewardPriority", &json!([]), &json!(short)).is_err());
+        let mut duplicate = good.as_array().unwrap().clone();
+        duplicate[11] = json!("Pegasus");
+        assert!(check_new_value("BlackFlowStartRewardPriority", &json!([]), &json!(duplicate)).is_err());
+        let mut unknown = good.as_array().unwrap().clone();
+        unknown[0] = json!("None");
+        assert!(check_new_value("BlackFlowStartRewardPriority", &json!([]), &json!(unknown)).is_err());
     }
 
     #[test]
@@ -1629,6 +2580,14 @@ mod selftest {
             "ark.farmAppend",
             "ark.farmMaxTimesPerRound",
             "ark.alsoEnableMainFight",
+            "runtime.retryOnce",
+            "runtime.arkVisionRescue",
+            "runtime.mumuVisionRescue",
+            "runtime.visionAllowReward",
+            "runtime.supervisor",
+            "runtime.keepScreenOn",
+            "notify.toast",
+            "runtime.abortOnMaaStallWarning",
             "runtime.quitAssistantAfter",
             "runtime.closeArknightsAfter",
             "runtime.launchArkFromHelper",
@@ -1774,6 +2733,33 @@ mod selftest {
     }
 
     #[test]
+    fn maa_roguelike_patch_keeps_object_arrays_and_order() {
+        let t = "{\r\n  \"Configurations\": {\r\n    \"Default\": {\r\n      \"TaskQueue\": [\r\n        {\r\n          \"$type\": \"RoguelikeTask\",\r\n          \"TaskType\": \"Roguelike\",\r\n          \"Name\": \"自动肉鸽\",\r\n          \"IsEnable\": true,\r\n          \"StartingOpers\": [{\"Name\": \"令\"}],\r\n          \"BlackFlowStartAnimal1\": \"None\",\r\n          \"BlackFlowStartAnimal2\": \"None\",\r\n          \"BlackFlowStartRewards\": \"None\",\r\n          \"BlackFlowStartRewardPriority\": [\"Pegasus\", \"SpaceLease\", \"ForestRide\", \"UnnumberedItem\", \"RegressionCompensation\", \"SurveyAdvance\", \"NestParasitism\", \"Hippogriff\", \"Dragon\", \"Hydra\", \"BaiZe\", \"GoldenCrow\"]\r\n        }\r\n      ]\r\n    }\r\n  }\r\n}".to_string();
+        let priority = vec!["GoldenCrow", "BaiZe", "Hydra", "Dragon", "Hippogriff", "NestParasitism",
+            "SurveyAdvance", "RegressionCompensation", "UnnumberedItem", "ForestRide", "SpaceLease", "Pegasus"];
+        let p = patch_of(vec![
+            ("StartingOpers", json!([{"Name": "缄默德克萨斯", "UseSupport": false}, {"Name": "令"}])),
+            ("BlackFlowStartAnimal1", json!("FeatheredSerpent")),
+            ("BlackFlowStartAnimal2", json!("Cat")),
+            ("BlackFlowStartRewards", json!("Pegasus, BaiZe, GoldenCrow")),
+            ("BlackFlowStartRewardPriority", json!(priority)),
+        ]);
+        let (out, changed) = apply_task_patch(&t, 0, "Roguelike", "自动肉鸽", &p).unwrap();
+        assert_eq!(changed.len(), 5);
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let q = &v["Configurations"]["Default"]["TaskQueue"][0];
+        assert_eq!(q["StartingOpers"], json!([{"Name": "缄默德克萨斯", "UseSupport": false}, {"Name": "令"}]));
+        assert_eq!(q["BlackFlowStartAnimal1"], json!("FeatheredSerpent"));
+        assert_eq!(q["BlackFlowStartAnimal2"], json!("Cat"));
+        assert_eq!(q["BlackFlowStartRewards"], json!("Pegasus, BaiZe, GoldenCrow"));
+        assert_eq!(q["BlackFlowStartRewardPriority"][0], json!("GoldenCrow"));
+        assert_eq!(q["BlackFlowStartRewardPriority"][11], json!("Pegasus"));
+        assert!(out.contains("\"IsEnable\": true"), "身份键原样保留");
+        assert!(out.contains("\"TaskType\": \"Roguelike\""), "身份键原样保留");
+        assert_eq!(out.matches('\n').count(), out.matches("\r\n").count(), "CRLF 文件里混进了裸 LF");
+    }
+
+    #[test]
     fn maa_patch_rooms_and_noop() {
         let t = maa_fixture();
         let p = patch_of(vec![(
@@ -1801,5 +2787,165 @@ mod selftest {
         let (out2, changed2) = apply_task_patch(&t, 1, "Infrast", "基建换班", &p).unwrap();
         assert!(changed2.is_empty());
         assert_eq!(out2, t);
+    }
+
+    /* ── M9A 实例配置：队列四字段 + 选项树 + 原位改写 ── */
+
+    fn m9a_fixture() -> String {
+        "{\r\n  \"_readme\": {\"keep\": \"原样\"},\r\n  \"InstanceName\": \"测试实例\",\r\n  \"Resource\": \"官服\",\r\n  \"CurrentControllerName\": \"ADB\",\r\n  \"CurrentController\": 2,\r\n  \"InstancePresetKey\": \"\",\r\n  \"CurrentTasks\": [\r\n    \"Bank:Bank\"\r\n  ],\r\n  \"DeletedTaskNames\": [],\r\n  \"MissingTaskSessions\": {\"Bank\": \"old\", \"Legacy\": \"old2\"},\r\n  \"KeepEmptyTaskQueue\": false,\r\n  \"TaskItems\": [],\r\n  \"ResourceOptionItems\": {},\r\n  \"ControllerOptionItems\": {},\r\n  \"GlobalOptionItems\": []\r\n}".to_string()
+    }
+
+    fn m9a_catalog_fixture() -> Value {
+        let defs = json!([
+            {"name":"柜台特惠","type":"switch","cases":[{"name":"Yes","options":["子选项"]},{"name":"No"}],"defaultCase":"Yes","inputs":[]},
+            {"name":"子选项","type":"select","cases":[{"name":"A"},{"name":"B"}],"defaultCase":"A","inputs":[]},
+            {"name":"多层","type":"checkbox","cases":[{"name":"One"},{"name":"Two"}],"defaultCase":[],"inputs":[]},
+            {"name":"自定义兑换码","type":"input","cases":[],"defaultCase":null,"inputs":[{"name":"Code","default":"","password":false},{"name":"Secret","default":"do-not-return-default","password":true}]}
+        ]);
+        json!({
+            "resources":[{"name":"官服","controllers":["ADB"]}],
+            "controllers":["ADB","PC"],
+            "presets":[],
+            "tasks":[
+                {"name":"Bank","entry":"Bank","options":defs},
+                {"name":"Psychube","entry":"Psychube","options":[]},
+                {"name":"Awards","entry":"Awards","options":[]}
+            ],
+            "resourceOptions":{},"controllerOptions":{},"globalOptions":[]
+        })
+    }
+
+    #[test]
+    fn m9a_catalog_uses_keys_and_localized_labels_without_cycles() {
+        let defs = json!({
+            "Parent":{"name":"WrongParent","type":"switch","label":"$Option.Parent","description":"$Option.Parent.desc","cases":[{"name":"On","option":["Child"]},{"name":"Off"}]},
+            "Child":{"name":"WrongChild","type":"select","label":"$Option.Child","cases":[{"name":"A","option":["Grand"]},{"name":"B"}]},
+            "Grand":{"type":"checkbox","cases":[{"name":"One","option":["Parent"]}]}
+        }).as_object().unwrap().clone();
+        let locale = json!({"Option.Parent":"父项标签","Option.Parent.desc":"父项说明","Option.Child":"子项标签"});
+        let got = m9a_defs_from_names(&defs, &["Parent".to_string()], &locale);
+        let names: Vec<&str> = got.iter().filter_map(|d| d.get("name").and_then(|x| x.as_str())).collect();
+        assert_eq!(names, ["Parent", "Child", "Grand"], "身份取外层键；只给父名也必须递归取到孙项，且环不能爆栈");
+        assert_eq!(got[0]["label"], json!("父项标签"));
+        assert_eq!(got[0]["description"], json!("父项说明"));
+        assert_eq!(got[1]["label"], json!("子项标签"));
+        assert_eq!(got[2]["name"], json!("Grand"), "没有 label 时仍保留原键名");
+    }
+
+    #[test]
+    fn m9a_child_edit_materializes_default_parent() {
+        let t = m9a_fixture();
+        let cat = m9a_catalog_fixture();
+        let patch = json!({"name":"测试实例","optionEdits":[
+            {"source":"task","task":0,"path":["柜台特惠","子选项"],"selected_case":"B"}
+        ]});
+        let (out, _) = apply_m9a_instance_patch(&t, "测试实例", &patch, &cat).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        let parent = &v["TaskItems"][0]["option"][0];
+        assert_eq!(parent["name"], json!("柜台特惠"));
+        assert_eq!(parent["selected_case"], json!("Yes"));
+        assert_eq!(parent["index"], json!(0));
+        assert_eq!(parent["sub_options"][0]["selected_case"], json!("B"));
+    }
+
+    #[test]
+    fn m9a_patch_syncs_queue_and_option_tree() {
+        let t = m9a_fixture();
+        let cat = m9a_catalog_fixture();
+        let patch = json!({
+            "name":"测试实例",
+            "currentTasks":["Bank:Bank","Psychube<|||>Psychube"],
+            "optionEdits":[
+                {"source":"task","task":0,"path":["柜台特惠"],"selected_case":"Yes"},
+                {"source":"task","task":0,"path":["柜台特惠","子选项"],"selected_case":"B"},
+                {"source":"task","task":0,"path":["多层"],"selected_cases":["Two","One"]}
+            ]
+        });
+        let (out, changed) = apply_m9a_instance_patch(&t, "测试实例", &patch, &cat).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["CurrentTasks"], json!(["Bank<|||>Bank","Psychube<|||>Psychube"]));
+        assert_eq!(v["DeletedTaskNames"], json!(["Awards"]), "未选的已知任务必须进删除名单");
+        assert_eq!(v["MissingTaskSessions"], json!({"Legacy":"old2"}), "已知名字清出缺失追踪，未知旧项保留");
+        assert_eq!(v["KeepEmptyTaskQueue"], json!(false));
+        let item = &v["TaskItems"][0];
+        assert_eq!(item["name"], json!("Bank"));
+        assert_eq!(item["option"][0]["selected_case"], json!("Yes"));
+        assert_eq!(item["option"][0]["index"], json!(0));
+        assert_eq!(item["option"][0]["sub_options"][0]["selected_case"], json!("B"));
+        let multi = item["option"].as_array().unwrap().iter().find(|n| n.get("name").and_then(|x| x.as_str()) == Some("多层")).unwrap();
+        assert_eq!(multi["selected_cases"], json!(["Two","One"]));
+        assert!(multi.get("index").is_none());
+        assert_eq!(v["_readme"], json!({"keep":"原样"}));
+        assert_eq!(out.matches('\n').count(), out.matches("\r\n").count(), "CRLF 不混裸 LF");
+        assert!(changed.iter().any(|x| x == "CurrentTasks"));
+        assert!(changed.iter().any(|x| x.starts_with("TaskItems")));
+        // 同一根成员被多个选项改动命中时，文本计划必须去重，不能叠 span。
+        assert!(serde_json::from_str::<Value>(&out).is_ok());
+    }
+
+    #[test]
+    fn capture_m9a_instance_id_is_authoritative() {
+        assert!(m9a_instance_matches("id-a", "旧名", "ID-A", "新名"));
+        assert!(!m9a_instance_matches("id-missing", "旧名", "id-b", "旧名"), "ID 失效不得借同名实例回退");
+        assert!(!m9a_instance_matches("", "", "id-b", "旧名"), "指针缺失不得猜实例");
+        assert!(m9a_instance_matches("", "旧名", "id-b", "旧名"));
+    }
+
+    #[test]
+    fn capture_adb_is_relative_to_mumu_dir_not_m9a_dir() {
+        let paths = json!({
+            "m9aDir": "m9a-root",
+            "mumuDir": "mumu-root",
+            "mumuAdb": "nx_main\\adb.exe"
+        });
+        assert_eq!(capture_adb_path(&paths), Path::new("mumu-root").join("nx_main").join("adb.exe"));
+        let absolute = json!({ "mumuDir": "mumu-root", "mumuAdb": "D:\\adb.exe" });
+        assert_eq!(capture_adb_path(&absolute), PathBuf::from("D:\\adb.exe"));
+    }
+
+    #[test]
+    fn m9a_patch_rejects_bad_identity_candidates_and_inputs() {
+        let t = m9a_fixture();
+        let cat = m9a_catalog_fixture();
+        let run = |p: Value| apply_m9a_instance_patch(&t, "测试实例", &p, &cat);
+        assert!(apply_m9a_instance_patch(&t, "别的", &json!({"name":"别的"}), &cat).is_err(), "实例名陈旧编辑必须拒绝");
+        assert!(run(json!({"name":"别的"})).is_err(), "patch 身份不能冒用别的实例名");
+        assert!(run(json!({"AdbSerial":"x"})).is_err());
+        assert!(run(json!({"currentTasks":["未知<|||>Unknown"]})).is_err());
+        assert!(run(json!({"currentTasks":["Bank<|||>Bank<|||>x"]})).is_err());
+        assert!(run(json!({"controller":"PC"})).is_err(), "官服不支持 PC");
+        assert!(run(json!({"optionEdits":[{"source":"task","task":0,"path":["自定义兑换码"],"selected_case":"x"}]})).is_err());
+        assert!(run(json!({"optionEdits":[{"source":"task","task":0,"path":["不存在"]}]})).is_err());
+        let (same, changed) = run(json!({"name":"测试实例"})).unwrap();
+        assert!(changed.is_empty());
+        assert_eq!(same, t);
+    }
+
+    #[test]
+    fn m9a_safe_nodes_masks_password_and_follows_active_case() {
+        let cat = m9a_catalog_fixture();
+        let defs = m9a_task_defs(&cat, "Bank");
+        let raw = json!([
+            {"name":"柜台特惠","index":1,"selected_case":"No","sub_options":[{"name":"子选项","selected_case":"B"}]},
+            {"name":"自定义兑换码","data":{"Code":"ABC-123","Secret":"do-not-return"}}
+        ]);
+        let safe = m9a_safe_nodes(Some(&raw), &defs);
+        let text = serde_json::to_string(&safe).unwrap();
+        let input_def = defs.iter().find(|d| d.get("name").and_then(|x| x.as_str()) == Some("自定义兑换码")).unwrap();
+        let def_text = serde_json::to_string(&m9a_option_def(input_def, "自定义兑换码", &json!({}))).unwrap();
+        assert!(!def_text.contains("do-not-return-default"), "密码 input 的默认值不能从目录定义离开 Rust");
+        assert!(!text.contains("do-not-return"));
+        assert!(!text.contains("do-not-return-default"), "密码 input 的默认值也不能从安全节点离开 Rust");
+        assert!(!text.contains("子选项"), "No 分支不显示未激活子项");
+        assert!(text.contains("ABC-123"), "非密码 input 现值可展示");
+    }
+
+    #[test]
+    fn m9a_history_accepts_only_real_formats() {
+        assert_eq!(m9a_history_parts("Bank<|||>Bank"), Some(("Bank".into(),"Bank".into())));
+        assert_eq!(m9a_history_parts("Bank:Bank"), Some(("Bank".into(),"Bank".into())));
+        assert_eq!(m9a_history_parts("Bank<||>Bank"), None);
+        assert_eq!(m9a_history_parts("A<|||>B<|||>C"), None);
+        assert_eq!(m9a_history_parts("A:B:C"), None);
     }
 }

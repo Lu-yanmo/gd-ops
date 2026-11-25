@@ -12,6 +12,7 @@ use std::fs;
 use std::io::{BufRead, BufReader, Read};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, Stdio};
+use std::sync::mpsc::{self, Receiver};
 use std::thread;
 use std::time::{Duration, Instant};
 
@@ -74,8 +75,9 @@ fn norm_games(games: Option<&str>, allowed: &[String]) -> Result<Option<String>,
 
 /* ── 进程：捕获输出 / 脱手起 ── */
 
-fn drain<R: Read + Send + 'static>(r: R) -> thread::JoinHandle<Vec<String>> {
-    thread::spawn(move || {
+fn drain<R: Read + Send + 'static>(r: R) -> Receiver<Vec<String>> {
+    let (tx, rx) = mpsc::sync_channel(1);
+    std::thread::spawn(move || {
         let rd = BufReader::new(r);
         let mut out = Vec::new();
         for line in rd.lines() {
@@ -85,12 +87,18 @@ fn drain<R: Read + Send + 'static>(r: R) -> thread::JoinHandle<Vec<String>> {
                 break;
             }
         }
-        out
-    })
+        let _ = tx.send(out);
+    });
+    rx
+}
+
+fn finish_drain(rx: Receiver<Vec<String>>) -> Vec<String> {
+    // 孙进程若继承管道，读取线程可能不退出；只等有限时间，绝不拖住捕获调用。
+    rx.recv_timeout(Duration::from_millis(500)).unwrap_or_default()
 }
 
 /// 跑一个子进程并等它结束（有超时）；返回 (退出码, stdout 行, stderr 行)。
-fn run_capture(cmd: &mut Command, dur: Duration) -> Result<(i32, Vec<String>, Vec<String>), String> {
+pub(crate) fn run_capture(cmd: &mut Command, dur: Duration) -> Result<(i32, Vec<String>, Vec<String>), String> {
     cmd.stdin(Stdio::null()).stdout(Stdio::piped()).stderr(Stdio::piped());
     #[cfg(target_os = "windows")]
     cmd.creation_flags(CREATE_NO_WINDOW);
@@ -113,11 +121,15 @@ fn run_capture(cmd: &mut Command, dur: Duration) -> Result<(i32, Vec<String>, Ve
                 }
                 thread::sleep(Duration::from_millis(50));
             }
-            Err(e) => return Err(e.to_string()),
+            Err(e) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(e.to_string());
+            }
         }
     }
-    let out = ho.map(|h| h.join().unwrap_or_default()).unwrap_or_default();
-    let err = he.map(|h| h.join().unwrap_or_default()).unwrap_or_default();
+    let out = ho.map(finish_drain).unwrap_or_default();
+    let err = he.map(finish_drain).unwrap_or_default();
     Ok((code.unwrap_or(-1), out, err))
 }
 

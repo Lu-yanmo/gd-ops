@@ -163,7 +163,6 @@ function applyLivePanel(s: Snapshot): void {
   S.live.age = s.log ? humanAge(s.log.ageSecs) : '—';
   S.live.action = chain.running ? 'dry-run · pid ' + chain.pid : (runAlive ? 'run · pid ' + (s.run ? s.run.pid : 0) : 'none');
   S.live.hot = false;
-  S.live.vcap = s.shots && s.shots.length ? s.shots[0].path : 'state/rescue · 暂无截图';
   S.live.vcalls = s.vision ? 'calls.jsonl · ' + s.vision.calls + ' 条 · ' + humanAge(s.vision.ageSecs) + '前' : '—';
   emit('live');
 }

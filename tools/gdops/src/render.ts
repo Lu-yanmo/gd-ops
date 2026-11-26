@@ -378,10 +378,18 @@ function renderLive(): void {
   $('#previewEmpty').hidden = hasFrame;
   $('#previewTag').textContent = '实时游戏画面 · ' + (c.stale ? '帧已过期' : (labels[c.state] || c.state));
   const stamp = c.updated ? new Date(c.updated).toLocaleTimeString('zh-CN', { hour12: false }) : '—';
-  $('#previewCap').textContent = c.error || (hasFrame
-    ? (c.source === 'adb' ? 'M9A · ADB 设备画面' : '端游窗口画面') + ' · ' + stamp
-    : (bridge.mode === 'live' ? '等待游戏路读数；不占用前台、不注入操作' : '浏览器演示模式不捕获真实游戏画面'));
-  $('#previewCap').title = $('#previewCap').textContent || '';
+  const fps = c.fps && c.fps > 0 ? ' · ' + c.fps.toFixed(1) + ' fps' : '';
+  const frameText = hasFrame
+    ? (c.source === 'adb' ? 'M9A · ADB 设备画面' : '端游窗口画面') + fps + ' · ' + stamp
+    : (bridge.mode === 'live' ? '等待游戏路读数；不占用前台、不注入操作' : '浏览器演示模式不捕获真实游戏画面');
+  $('#previewCap').textContent = hasFrame && (c.error || c.note)
+    ? frameText + ' · ' + (c.error || c.note)
+    : c.error || c.note || frameText;
+  const metrics = [
+    c.captureMs !== undefined ? '捕获 ' + Math.round(c.captureMs) + 'ms' : '',
+    c.encodedBytes !== undefined ? '画面 ' + (c.encodedBytes / 1024).toFixed(1) + 'KiB' : '',
+  ].filter(Boolean).join(' · ');
+  $('#previewCap').title = [($('#previewCap').textContent || ''), metrics].filter(Boolean).join(' · ');
   const btn = $('#previewBtn') as HTMLButtonElement;
   btn.disabled = bridge.mode !== 'live' || !S.sel;
   btn.textContent = c.active ? '暂停画面' : '开启画面';

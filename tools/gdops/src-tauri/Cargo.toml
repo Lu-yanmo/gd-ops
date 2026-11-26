@@ -16,9 +16,11 @@ tauri = { version = "2", features = [] }
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 png = "0.18"
+jpeg-encoder = { version = "0.7.1", features = ["simd"] }
+base64 = "0.21.7"
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { version = "0.62", features = [
-  "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_Xps", "Win32_System_Threading", "Win32_UI_WindowsAndMessaging"
+  "Win32_Foundation", "Win32_Graphics_Gdi", "Win32_Storage_Xps", "Win32_System_Threading", "Win32_System_JobObjects", "Win32_Security", "Win32_UI_WindowsAndMessaging"
 ] }
 
 # 发布构建必须带 custom-protocol，否则 tauri 认为仍是开发态、去连 devUrl。

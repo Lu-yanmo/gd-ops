@@ -12,7 +12,7 @@
 // 内核每轮会重写的 Fight 字段只读并挂徽标——手改下一轮就被覆盖，不如如实说。
 import { esc } from './util';
 import type { Bridge } from './bridge';
-import type { ActResult, M9aCatalogs, M9aInst, M9aOptionDef, M9aOptionNode, MaaTask, MaaState, MaaCatalogs } from './types';
+import type { ActResult, M9aCatalogs, M9aInst, M9aOptionCase, M9aOptionDef, M9aOptionNode, MaaTask, MaaState, MaaCatalogs } from './types';
 import { openDrawer, type DrawerHandle } from './drawer';
 import * as S from './state';
 
@@ -34,6 +34,7 @@ interface F {
   ro?: boolean;
   allowEmpty?: boolean;
   max?: number;
+  when?: (cfg: Cfg) => boolean;
 }
 
 interface G {
@@ -158,11 +159,40 @@ const BF_CULTIVATION: Record<string, string> = {
 };
 
 const FAST_FLIGHT_LOCKED = new Set(['Squad', 'SquadCollectible', 'Roles', 'StartingOpers', 'BlackFlowEnding']);
+const PREP_FLIGHT_LOCKED = new Set(['SquadCollectible']);
+const DIFFICULTY_MAX: Record<string, number> = {
+  Phantom: 15, Mizuki: 18, Sami: 15, Sarkaz: 18, JieGarden: 18, BlackFlow: 16,
+};
+
 function fastFlightLocked(cfg: Cfg): boolean {
-  return cfg.Theme === 'BlackFlow' && cfg.BlackFlowFastFlight === true;
+  return cfg.Theme === 'BlackFlow' && cfg.Mode === 'Exp' && cfg.BlackFlowFastFlight === true;
+}
+
+function prepFlightLocked(cfg: Cfg): boolean {
+  return cfg.Theme === 'BlackFlow' && cfg.Mode === 'BlackFlowStartRun' && cfg.BlackFlowStartRunFastFlight === true;
+}
+
+function flightLockReason(cfg: Cfg, key: string): string {
+  if (fastFlightLocked(cfg) && FAST_FLIGHT_LOCKED.has(key)) return '快速飞三层锁定';
+  if (prepFlightLocked(cfg) && PREP_FLIGHT_LOCKED.has(key)) return '准备局快速飞三层锁定';
+  return '';
+}
+
+function flightLockedKeys(cfg: Cfg): Set<string> {
+  return fastFlightLocked(cfg) ? FAST_FLIGHT_LOCKED : prepFlightLocked(cfg) ? PREP_FLIGHT_LOCKED : new Set<string>();
+}
+
+function difficultyNums(cfg: Cfg): number[] {
+  const max = DIFFICULTY_MAX[String(cfg.Theme || '')];
+  return max === undefined ? [-1, 2147483647] : [-1, ...Array.from({ length: max + 1 }, (_, i) => i), 2147483647];
+}
+
+function fieldVisible(f: F, cfg: Cfg): boolean {
+  return !f.when || f.when(cfg);
 }
 
 const GENERIC_NUMS = [0, 1, 2, 3, 4, 5, 6, 8, 10, 20, 30, 50, 99, 100, 999];
+const FARM_COUNTS = Array.from({ length: 30 }, (_, i) => i + 1);
 const MINUTE_SECS = [60, 120, 180, 240, 300, 360, 420, 480, 540, 600, 720, 780, 900];
 
 /** 每个任务类型：按 MAA 原界面的分组与顺序。字段在 cfg 里缺的自动不渲染。 */
@@ -413,8 +443,7 @@ function schema(type: string): G[] {
               k: 'Difficulty',
               label: '难度',
               kind: 'int',
-              nums: [-1, 0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 2147483647],
-              labels: { '-1': '自动', '2147483647': 'MAX（自动）' },
+              labels: { '-1': '自动（不切换）', '2147483647': 'MAX（自动）' },
             },
             { k: 'Mode', label: '刷取策略', kind: 'enum', src: 'modes' },
             {
@@ -465,10 +494,15 @@ function schema(type: string): G[] {
         {
           title: '黑流树海',
           fields: [
-            { k: 'BlackFlowEnding', label: '目标结局', kind: 'enum', opts: [['Ending1', '一结局 · 强制重启']], hint: '快速飞三层开启时不能选择结局' },
+            { k: 'BlackFlowEnding', label: '目标结局', kind: 'enum', opts: [['Ending1', '一结局 · 强制重启']], hint: '刷等级且快速飞三层开启时不能选择结局' },
             { k: 'BlackFlowEnding2', label: '二结局（旧字段）', ro: true },
             { k: 'BlackFlowEnding3', label: '三结局（旧字段）', ro: true },
-            { k: 'BlackFlowFastFlight', label: '快速飞三层', hint: '开启后锁定分队、职业组、开局干员与结局' },
+            { k: 'BlackFlowFastFlight', label: '快速飞三层', hint: '仅刷等级策略生效；开启后锁定分队、职业组、开局干员与结局' },
+            {
+              k: 'BlackFlowStartRunFastFlight', label: '准备局快速飞三层',
+              when: (cfg) => cfg.Theme === 'BlackFlow' && cfg.Mode === 'BlackFlowStartRun',
+              hint: '准备局固定使用满天赋机械师，只招机械师并直飞第三层；仅锁定特勤分队，其余开局设置留给目标局',
+            },
             { k: 'BlackFlowStartUtopia', label: '凹第一层实托邦', hint: '需难度 6 及以上' },
             { k: 'BlackFlowStartAnimal1', label: '襁褓动物 · 第一只', kind: 'enum', opts: BF_ANIMALS },
             { k: 'BlackFlowStartAnimal2', label: '襁褓动物 · 第二只', kind: 'enum', opts: BF_ANIMALS, hint: '两只不能同时要求襁褓羽蛇' },
@@ -596,8 +630,8 @@ function selHtml(attrs: string, cur: string, opts: [string, string][], blankLabe
     '</select>';
 }
 
-function intOpts(f: F, cur: unknown): [string, string][] {
-  const base = f.nums ?? GENERIC_NUMS;
+function intOpts(f: F, cur: unknown, cfg?: Cfg): [string, string][] {
+  const base = f.k === 'Difficulty' && cfg ? difficultyNums(cfg) : f.nums ?? GENERIC_NUMS;
   const c = typeof cur === 'number' ? cur : Number(cur);
   const all = Number.isFinite(c) ? Array.from(new Set([...base, c])).sort((a, b) => a - b) : base.slice();
   return all.map((n) => [String(n), (f.labels && f.labels[String(n)]) || String(n)] as [string, string]);
@@ -727,19 +761,19 @@ function inputHtml(task: MaaTask, f: F, cat?: MaaCatalogs): string {
   if (f.k === 'StartingOpers') return startingHtml(task, cat) + hint;
   if (f.k === 'BlackFlowStartRewards') return bfRewardsHtml(task) + hint;
   if (f.k === 'BlackFlowStartRewardPriority') return bfPriorityHtml(task) + hint;
-  if (fastFlightLocked(task.cfg) && ['Squad', 'SquadCollectible', 'Roles'].includes(f.k)) {
-    return '<div class="drRo">' + esc(fmt(v)) + '<b class="drK">快速飞三层锁定</b></div>' + hint;
+  if (flightLockReason(task.cfg, f.k)) {
+    return '<div class="drRo">' + esc(fmt(v)) + '<b class="drK">' + esc(flightLockReason(task.cfg, f.k)) + '</b></div>' + hint;
   }
   if (kind === 'bool') {
     return '<div class="drCtl">' + selHtml('data-fk="' + esc(f.k) + '" data-ft="bool"', v === true ? '1' : '0', [['1', '开'], ['0', '关']]) + '</div>' + hint;
   }
   if (kind === 'int') {
-    return '<div class="drCtl">' + selHtml('data-fk="' + esc(f.k) + '" data-ft="int"', String(typeof v === 'number' ? v : 0), intOpts(f, v)) + '</div>' + hint;
+    return '<div class="drCtl">' + selHtml('data-fk="' + esc(f.k) + '" data-ft="int"', String(typeof v === 'number' ? v : 0), intOpts(f, v, task.cfg)) + '</div>' + hint;
   }
   if (kind === 'enum') {
     const opts = f.src ? catOpts(f.src, cat, task.cfg) : f.opts || [];
-    if (f.k === 'BlackFlowEnding' && fastFlightLocked(task.cfg)) {
-      return '<div class="drRo">' + esc(fmt(v)) + '<b class="drK">快速飞三层锁定</b></div>' + hint;
+    if (f.k === 'BlackFlowEnding' && flightLockReason(task.cfg, f.k)) {
+      return '<div class="drRo">' + esc(fmt(v)) + '<b class="drK">' + esc(flightLockReason(task.cfg, f.k)) + '</b></div>' + hint;
     }
     if (f.k === 'BlackFlowStartAnimal1' || f.k === 'BlackFlowStartAnimal2') {
       const otherKey = f.k === 'BlackFlowStartAnimal1' ? 'BlackFlowStartAnimal2' : 'BlackFlowStartAnimal1';
@@ -752,11 +786,11 @@ function inputHtml(task: MaaTask, f: F, cat?: MaaCatalogs): string {
   }
   if (kind === 'rooms') {
     const rooms = Array.isArray(v) ? v as { Room?: unknown; IsEnabled?: unknown }[] : [];
-    return '<div class="drRooms">' + rooms.map((r) => {
+    return '<div class="drRooms">' + rooms.map((r, roomIndex) => {
       const key = String(r.Room || '');
       const on = r.IsEnabled !== false;
       return '<div class="drRoomRow"><span class="drRoomName">' + esc(ROOM_CN[key] || key) + '</span>' +
-        selHtml('data-room="' + esc(key) + '"', on ? '1' : '0', [['1', '启用'], ['0', '禁用']]) + '</div>';
+        selHtml('data-room="' + esc(key) + '" data-room-index="' + roomIndex + '"', on ? '1' : '0', [['1', '启用'], ['0', '禁用']]) + '</div>';
     }).join('') + '</div>' + hint;
   }
   if (kind === 'ro') {
@@ -776,8 +810,8 @@ function inputHtml(task: MaaTask, f: F, cat?: MaaCatalogs): string {
   return '<div class="drCtl">' + selHtml('data-fk="' + esc(f.k) + '" data-ft="single"', String(v ?? ''), withEmpty) + '</div>' + hint;
 }
 
-function rowHtml(task: MaaTask, f: F, cat?: MaaCatalogs): string {
-  return '<div class="drF" data-cfg-key="' + esc(f.k) + '"><span class="drL">' + esc(f.label) + '</span><div class="drV">' + inputHtml(task, f, cat) + '</div></div>';
+function rowHtml(task: MaaTask, f: F, cat?: MaaCatalogs, hidden = false): string {
+  return '<div class="drF" data-cfg-key="' + esc(f.k) + '"' + (hidden ? ' style="display:none"' : '') + '><span class="drL">' + esc(f.label) + '</span><div class="drV">' + inputHtml(task, f, cat) + '</div></div>';
 }
 
 /* ── 面板计划源（写 settings，不是 MAA 配置） ── */
@@ -787,7 +821,7 @@ function planFields(task: MaaTask): F[] {
   if (t === 'fight') {
     return [
       { k: 'ark.defaultStage', label: '默认关卡', kind: 'list', src: 'stages', enc: ',', hint: '内核每轮按顺序挑第一关能打的写进 StagePlan；可排多关做轮换' },
-      { k: 'ark.farmMaxTimesPerRound', label: '每轮最多补刷', kind: 'int', nums: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10] },
+      { k: 'ark.farmMaxTimesPerRound', label: '每轮最多补刷', kind: 'int', nums: FARM_COUNTS, labels: { '0': '0 · 旧值（内核实际按 1 次）' }, hint: '合法范围 1~30；不补刷请关闭「长草追加补刷」' },
       { k: 'ark.farmAppend', label: '长草追加补刷', kind: 'bool' },
       { k: 'ark.alsoEnableMainFight', label: '同时开主关卡', kind: 'bool' },
     ];
@@ -810,6 +844,9 @@ function planInput(key: string, f: F, maa: MaaState, cat?: MaaCatalogs): string 
     return selHtml('data-sk="' + esc(key) + '" data-st="bool"', v === true ? '1' : '0', [['1', '开'], ['0', '关']]);
   }
   if (f.kind === 'int') {
+    if (key === 'ark.farmMaxTimesPerRound' && (typeof v !== 'number' || !Number.isSafeInteger(v))) {
+      return '<div class="drRo">现值类型异常，面板不覆盖；请先在配置里修正为 1~30 的整数</div>';
+    }
     return selHtml('data-sk="' + esc(key) + '" data-st="int"', String(typeof v === 'number' ? v : 0), intOpts(f, v));
   }
   if (f.kind === 'list') {
@@ -840,7 +877,7 @@ export function openMaaTaskDrawer(task: MaaTask, maa: MaaState, bridge: Bridge, 
       '</section>';
   }
   for (const g of groups) {
-    const rows = g.fields.filter((f) => f.k in task.cfg).map((f) => rowHtml(task, f, cat)).join('');
+    const rows = g.fields.filter((f) => f.k in task.cfg).map((f) => rowHtml(task, f, cat, !fieldVisible(f, task.cfg))).join('');
     if (rows) body += '<section class="drG"><h3>' + esc(g.title) + '</h3>' + rows + '</section>';
   }
   if (extra.length) {
@@ -884,20 +921,19 @@ export function openMaaTaskDrawer(task: MaaTask, maa: MaaState, bridge: Bridge, 
     for (const el of Array.from(h.body.querySelectorAll<HTMLSelectElement>('[data-fk]'))) {
       const k = el.dataset.fk || '';
       if (k === 'Filename' && el.value === '__KEEP__') continue;
-      if (fastFlightLocked(next) && FAST_FLIGHT_LOCKED.has(k)) continue;
+      // 锁定控件已被替换成只读 DOM；这里只收仍可编辑的草稿，不按切换后的目标状态倒扣刚做的修改。
       if (el.dataset.ft === 'bool') next[k] = el.value === '1';
       else if (el.dataset.ft === 'int') next[k] = Math.trunc(Number(el.value));
       else next[k] = el.value;
     }
     for (const box of Array.from(h.body.querySelectorAll<HTMLElement>('[data-list]'))) {
       const k = box.dataset.list || '';
-      if (fastFlightLocked(next) && FAST_FLIGHT_LOCKED.has(k)) continue;
       const enc = (box.dataset.enc as Enc) || 'arr';
       const vals = Array.from(box.querySelectorAll<HTMLSelectElement>('select[data-lv]')).map((s) => s.value).filter((v) => v !== '');
       next[k] = enc === 'arr' ? Array.from(new Set(vals)) : Array.from(new Set(vals)).join(enc);
     }
     const starting = h.body.querySelector<HTMLElement>('[data-special="StartingOpers"]');
-    if (starting?.dataset.dirty === '1' && !fastFlightLocked(next)) {
+    if (starting?.dataset.dirty === '1' && starting.querySelector('[data-so-name]')) {
       const items: StartingOper[] = [];
       for (let i = 0; i < 3; i++) {
         const name = starting.querySelector<HTMLSelectElement>('[data-so-name="' + i + '"]')?.value || '';
@@ -939,7 +975,17 @@ export function openMaaTaskDrawer(task: MaaTask, maa: MaaState, bridge: Bridge, 
         next.Mode = 'Exp';
         notes.push('新主题不支持原刷取策略，已改为刷等级');
       }
-      if (next.Theme !== 'BlackFlow') next.BlackFlowFastFlight = false;
+      if (next.Theme !== 'BlackFlow') {
+        next.BlackFlowFastFlight = false;
+        next.BlackFlowStartRunFastFlight = false;
+      }
+      if (typeof next.Difficulty === 'number') {
+        const max = DIFFICULTY_MAX[String(next.Theme || '')];
+        if (max !== undefined && next.Difficulty > max && next.Difficulty !== 2147483647) {
+          next.Difficulty = max;
+          notes.push('原难度超过新主题上限，已改为该主题最高难度');
+        }
+      }
       const roles = new Set(catOpts('roles', cat, next).map((x) => x[0]));
       if (typeof next.Roles === 'string' && next.Roles && !roles.has(next.Roles)) {
         next.Roles = '';
@@ -967,6 +1013,7 @@ export function openMaaTaskDrawer(task: MaaTask, maa: MaaState, bridge: Bridge, 
       const f = fieldMap.get(key);
       const row = Array.from(h.body.querySelectorAll<HTMLElement>('.drF')).find((el) => el.dataset.cfgKey === key);
       if (f && row) {
+        row.style.display = fieldVisible(f, next) ? '' : 'none';
         const value = row.querySelector('.drV');
         if (value) value.innerHTML = inputHtml(view, f, cat);
       }
@@ -1004,11 +1051,13 @@ export function openMaaTaskDrawer(task: MaaTask, maa: MaaState, bridge: Bridge, 
       }
     }
     if (el.dataset.fk === 'Theme') {
-      rerenderRogue(['Mode', 'Squad', 'SquadCollectible', 'Roles', 'StartingOpers', 'CollectibleStartAwards', 'BlackFlowFastFlight', 'BlackFlowEnding']);
+      rerenderRogue(['Mode', 'Difficulty', 'Squad', 'SquadCollectible', 'Roles', 'StartingOpers', 'CollectibleStartAwards', 'BlackFlowFastFlight', 'BlackFlowStartRunFastFlight', 'BlackFlowEnding']);
     } else if (el.dataset.fk === 'Mode') {
-      rerenderRogue(['Squad', 'SquadCollectible']);
+      rerenderRogue(['Squad', 'SquadCollectible', 'Roles', 'StartingOpers', 'BlackFlowStartRunFastFlight', 'BlackFlowEnding']);
     } else if (el.dataset.fk === 'BlackFlowFastFlight') {
       rerenderRogue(['Squad', 'SquadCollectible', 'Roles', 'StartingOpers', 'BlackFlowEnding']);
+    } else if (el.dataset.fk === 'BlackFlowStartRunFastFlight') {
+      rerenderRogue(['SquadCollectible']);
     }
     if (!(el instanceof HTMLSelectElement) || el.dataset.ladd === undefined || !el.value) return;
     // 「＋ 添加一项」：选中即落成一条新的值行，并把自己复位
@@ -1066,7 +1115,7 @@ export function openMaaTaskDrawer(task: MaaTask, maa: MaaState, bridge: Bridge, 
   });
 
   (h.foot.querySelector('[data-save]') as HTMLButtonElement).addEventListener('click', () => {
-    void save(h, task, bridge, after, say);
+    void save(h, task, maa, bridge, after, say);
   });
 }
 
@@ -1075,6 +1124,7 @@ interface Edit { key: string; value: unknown }
 async function save(
   h: DrawerHandle,
   task: MaaTask,
+  maa: MaaState,
   bridge: Bridge,
   after: () => void,
   say: (ok: boolean, text: string) => void,
@@ -1083,23 +1133,33 @@ async function save(
   if (btn.disabled) return;
 
   const theme = h.body.querySelector<HTMLSelectElement>('[data-fk="Theme"]')?.value ?? task.cfg.Theme;
+  const mode = h.body.querySelector<HTMLSelectElement>('[data-fk="Mode"]')?.value ?? task.cfg.Mode;
   const fast = h.body.querySelector<HTMLSelectElement>('[data-fk="BlackFlowFastFlight"]')?.value;
-  const fastFlight = fast === undefined ? task.cfg.BlackFlowFastFlight === true : fast === '1';
-  const locked = theme === 'BlackFlow' && fastFlight ? FAST_FLIGHT_LOCKED : new Set<string>();
+  const prepFast = h.body.querySelector<HTMLSelectElement>('[data-fk="BlackFlowStartRunFastFlight"]')?.value;
+  const saveCfg: Cfg = {
+    ...task.cfg, Theme: theme, Mode: mode,
+    BlackFlowFastFlight: fast === undefined ? task.cfg.BlackFlowFastFlight === true : fast === '1',
+    BlackFlowStartRunFastFlight: prepFast === undefined ? task.cfg.BlackFlowStartRunFastFlight === true : prepFast === '1',
+  };
+  const locked = flightLockedKeys(saveCfg);
 
   const edits: Edit[] = [];
   for (const el of Array.from(h.body.querySelectorAll<HTMLSelectElement>('[data-sk]'))) {
     const key = el.dataset.sk || '';
     const st = el.dataset.st;
-    if (st === 'bool') {
-      edits.push({ key, value: el.value === '1' });
-    } else if (st === 'int') {
+    const before = planValue(maa, key);
+    let value: unknown;
+    if (st === 'bool') value = el.value === '1';
+    else if (st === 'int') {
       const n = Number(el.value);
-      if (!Number.isFinite(n)) { el.classList.add('bad'); say(false, key + '：要整数'); return; }
-      edits.push({ key, value: Math.trunc(n) });
-    } else {
-      edits.push({ key, value: el.value });
-    }
+      if (!Number.isSafeInteger(n)) { el.classList.add('bad'); say(false, key + '：要整数'); return; }
+      if (key === 'ark.farmMaxTimesPerRound' && !(n >= 1 && n <= 30) && !(n === 0 && before === 0)) {
+        el.classList.add('bad'); say(false, key + '：合法范围是 1~30；旧值 0 只能原样保留'); return;
+      }
+      value = n;
+    } else value = el.value;
+    // 未变化的计划项不提交；异常旧值也不能借保存别的项被覆盖。
+    if (JSON.stringify(value) !== JSON.stringify(before)) edits.push({ key, value });
   }
 
   // 计划源里的多项（默认关卡）：settings 存逗号串，按 DOM 顺序拼回去；空值拒写。
@@ -1115,10 +1175,14 @@ async function save(
   }
 
   const patch: Cfg = {};
+  const saveFields = new Map<string, F>();
+  for (const group of schema(task.type)) for (const field of group.fields) saveFields.set(field.k, field);
   for (const el of Array.from(h.body.querySelectorAll<HTMLSelectElement>('[data-fk]'))) {
     const k = el.dataset.fk || '';
     if (KERNEL_FIGHT.has(k) && task.type === 'Fight') continue;
     if (locked.has(k)) continue;
+    const field = saveFields.get(k);
+    if (field && !fieldVisible(field, saveCfg)) continue;
     if (k === 'Filename' && el.value === '__KEEP__') continue;
     const ft = el.dataset.ft;
     let val: unknown;
@@ -1201,17 +1265,26 @@ async function save(
     }
   }
 
-  // 房间矩阵：按原顺序重建 RoomList（只喂 Room/IsEnabled 两键）。
+  // 房间矩阵：只改用户实际切换的行；未动房间的额外键与显式 IsEnabled:true 原样保留。
   const roomEls = Array.from(h.body.querySelectorAll<HTMLSelectElement>('[data-room]'));
   if (roomEls.length) {
-    const old = Array.isArray(task.cfg.RoomList) ? task.cfg.RoomList as { Room?: unknown }[] : [];
-    const rooms = old.map((r) => {
-      const key = String(r.Room || '');
-      const hit = roomEls.find((el) => el.dataset.room === key);
-      const on = hit ? hit.value === '1' : true;
-      return on ? { Room: key } : { Room: key, IsEnabled: false };
-    });
-    if (JSON.stringify(rooms) !== JSON.stringify(old)) patch.RoomList = rooms;
+    const old = Array.isArray(task.cfg.RoomList) ? task.cfg.RoomList : [];
+    let rooms: unknown[] | null = null;
+    for (const el of roomEls) {
+      const index = Number(el.dataset.roomIndex);
+      const original = old[index];
+      if (!Number.isInteger(index) || index < 0 || !original || typeof original !== 'object' || Array.isArray(original)) continue;
+      const row = original as Record<string, unknown>;
+      const on = row.IsEnabled !== false;
+      const nextOn = el.value === '1';
+      if (on === nextOn) continue;
+      if (!rooms) rooms = old.slice();
+      const next = { ...row };
+      if (nextOn) delete next.IsEnabled;
+      else next.IsEnabled = false;
+      rooms[index] = next;
+    }
+    if (rooms && JSON.stringify(rooms) !== JSON.stringify(old)) patch.RoomList = rooms;
   }
 
   if (!edits.length && !Object.keys(patch).length) { say(true, '跟原来一样，没有写盘'); return; }
@@ -1402,11 +1475,24 @@ function m9aOne(def: M9aOptionDef, node?: M9aOptionNode): string {
 }
 
 function m9aMany(def: M9aOptionDef, node?: M9aOptionNode): string[] {
+  // 目录外的已落盘 case 不展示、不可编辑，但不能在修改已知项时被前端过滤掉。
+  if (node?.selected_cases !== undefined) return node.selected_cases.slice();
   const valid = new Set((def.cases || []).map((c) => c.name));
-  const saved = (node?.selected_cases || []).filter((x) => valid.has(x));
-  if (node?.selected_cases !== undefined) return saved;
-  if (Array.isArray(def.defaultCase)) return def.defaultCase.filter((x) => valid.has(x));
-  return [];
+  return Array.isArray(def.defaultCase) ? def.defaultCase.filter((x) => valid.has(x)) : [];
+}
+
+function m9aUnknownCases(def: M9aOptionDef, node?: M9aOptionNode): string[] {
+  const valid = new Set((def.cases || []).map((c) => c.name));
+  return m9aMany(def, node).filter((x) => !valid.has(x));
+}
+
+function m9aMergeKnownCases(def: M9aOptionDef, node: M9aOptionNode | undefined, selected: string[]): string[] {
+  const valid = new Set((def.cases || []).map((c) => c.name));
+  const chosen = new Set(selected.filter((x) => valid.has(x)));
+  // 保留旧数组里未知项与原已知项的位置；只移除取消的已知项，新勾选项按操作顺序追加。
+  const out = m9aMany(def, node).filter((x) => !valid.has(x) || chosen.has(x));
+  for (const name of selected) if (valid.has(name) && !out.includes(name)) out.push(name);
+  return out;
 }
 
 function m9aChildren(def: M9aOptionDef, node?: M9aOptionNode): string[] {
@@ -1440,6 +1526,16 @@ function m9aSetNode(nodes: M9aOptionNode[], path: string[], value: Partial<M9aOp
 function m9aOptAttrs(source: M9aSource, path: string[], task?: string): string {
   return ' data-m9a-opt="1" data-src="' + source + '"' + (task === undefined ? '' : ' data-task="' + esc(task) + '"') +
     ' data-path="' + esc(JSON.stringify(path)) + '"';
+}
+
+// M9A 的 switch 常只给英文 case 名；固定语义补中文，其余仍用目录标签，不翻译配置值。
+const M9A_CASE_CN: Record<string, string> = {
+  No: '关', Yes: '开', Current: '当前', MAX: '最高',
+  '24h': '24 小时内', '7d': '7 天内', '14d': '14 天内',
+};
+
+function m9aCaseLabel(c: M9aOptionCase): string {
+  return M9A_CASE_CN[c.name] || c.label || c.name;
 }
 
 function m9aInputHtml(def: M9aOptionDef, node?: M9aOptionNode): string {
@@ -1479,15 +1575,17 @@ function m9aOptionsHtml(
     const attrs = m9aOptAttrs(source, path, task);
     let value: string;
     if (def.type === 'switch' || def.type === 'select') {
-      const opts: [string, string][] = (def.cases || []).map((c) => [c.name, c.label || c.name]);
+      const opts: [string, string][] = (def.cases || []).map((c) => [c.name, m9aCaseLabel(c)]);
       value = opts.length ? selHtml(attrs, m9aOne(def, node), opts) : '<div class="drRo">（目录没给候选）</div>';
     } else if (def.type === 'checkbox') {
       const cases = def.cases || [];
       const selected = new Set(m9aMany(def, node));
+      const unknownCount = m9aUnknownCases(def, node).length;
       value = cases.length
         ? '<select multiple class="drSel"' + attrs + ' size="' + Math.min(5, Math.max(2, cases.length)) + '">' +
-          cases.map((c) => '<option value="' + esc(c.name) + '"' + (selected.has(c.name) ? ' selected' : '') + '>' + esc(c.label || c.name) + '</option>').join('') +
-          '</select><i class="drHint">按住 Ctrl 可多选；不选 = 全部关闭</i>'
+          cases.map((c) => '<option value="' + esc(c.name) + '"' + (selected.has(c.name) ? ' selected' : '') + '>' + esc(m9aCaseLabel(c)) + '</option>').join('') +
+          '</select><i class="drHint">按住 Ctrl 可多选；不选 = 关闭全部已知项' +
+          (unknownCount ? '；另有 ' + unknownCount + ' 个目录外现值只读保留' : '') + '</i>'
         : '<div class="drRo">（目录没给候选）</div>';
     } else value = m9aInputHtml(def, node);
     const children = m9aChildren(def, node);
@@ -1671,8 +1769,19 @@ export function openM9aDrawer(inst: M9aInst, isCur: boolean, bridge: Bridge, aft
       } else nodes = source === 'resource'
         ? nodesForScoped('resource', resource)
         : source === 'controller' ? nodesForScoped('controller', controller) : globalNodes;
-      if (select.multiple) m9aSetNode(nodes, path, { selected_cases: Array.from(select.selectedOptions).map((o) => o.value) });
-      else {
+      if (select.multiple) {
+        const defs = source === 'task' ? (task === undefined ? [] : m9aTaskDef(cat, queue[task]) || []) : source === 'resource' ? cat.resourceOptions[resource] || [] : source === 'controller' ? cat.controllerOptions[controller] || [] : cat.globalOptions;
+        const def = defs.find((d) => d.name === path[path.length - 1]);
+        let current: M9aOptionNode | undefined;
+        let scope = nodes;
+        for (const name of path) {
+          current = scope.find((n) => n.name === name);
+          if (!current) break;
+          scope = current.sub_options || [];
+        }
+        const picked = Array.from(select.selectedOptions).map((o) => o.value);
+        m9aSetNode(nodes, path, { selected_cases: def ? m9aMergeKnownCases(def, current, picked) : picked });
+      } else {
         const defs = source === 'task' ? (task === undefined ? [] : m9aTaskDef(cat, queue[task]) || []) : source === 'resource' ? cat.resourceOptions[resource] || [] : source === 'controller' ? cat.controllerOptions[controller] || [] : cat.globalOptions;
         const def = defs.find((d) => d.name === path[path.length - 1]);
         const idx = (def?.cases || []).findIndex((c) => c.name === select.value);

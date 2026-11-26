@@ -12,8 +12,9 @@ use serde_json::{json, Value};
 use std::collections::HashSet;
 use std::fs;
 use std::path::{Path, PathBuf};
+use std::process::Command;
 use std::sync::{Mutex, MutexGuard};
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 // 所有 IPC 保存都经 spawn_blocking；锁必须包住「读旧值 → 备份 → 原位写 → 回读」整段，
 // 否则助手页与右栏同时保存时，后写会覆盖先写，而且两边仍可能各自回读成功。
@@ -70,6 +71,13 @@ fn b_ci(v: &Value, key: &str) -> bool {
 
 fn i_ci(v: &Value, key: &str) -> i64 {
     ci(v, key).and_then(|x| x.as_i64()).unwrap_or(0)
+}
+
+fn farm_count_ci(v: &Value, key: &str) -> Value {
+    match ci(v, key) {
+        Some(x) if x.as_i64().is_some() => x.clone(),
+        _ => Value::Null,
+    }
 }
 
 fn strs(v: Option<&Value>) -> Vec<String> {
@@ -408,6 +416,35 @@ fn check_blackflow_priority(items: &[Value]) -> Result<(), String> {
     Ok(())
 }
 
+fn check_room_list(old: &[Value], new: &[Value]) -> Result<(), String> {
+    if old.len() != new.len() {
+        return Err("RoomList：面板只改房间开关，不增删或重排房间".to_string());
+    }
+    for (i, (before, after)) in old.iter().zip(new.iter()).enumerate() {
+        let a = before.as_object().ok_or_else(|| format!("RoomList：第 {i} 间原值不是对象"))?;
+        let b = after.as_object().ok_or_else(|| format!("RoomList：第 {i} 间得是对象"))?;
+        let room = a.get("Room").and_then(|x| x.as_str()).ok_or_else(|| format!("RoomList：第 {i} 间原值缺 Room"))?;
+        if room.is_empty() || b.get("Room").and_then(|x| x.as_str()) != Some(room) {
+            return Err(format!("RoomList：第 {i} 间身份或顺序变了"));
+        }
+        if b.get("IsEnabled").is_some_and(|x| !x.is_boolean()) {
+            return Err(format!("RoomList：第 {i} 间 IsEnabled 只收开关"));
+        }
+        // 高级/未来字段不是面板的编辑面，但必须逐值保留；既不覆盖也不借保存开关删掉。
+        for (k, v) in b {
+            if !k.eq_ignore_ascii_case("Room") && !k.eq_ignore_ascii_case("IsEnabled") && a.get(k) != Some(v) {
+                return Err(format!("RoomList：第 {i} 间未知字段 {k} 变了或不存在"));
+            }
+        }
+        for k in a.keys() {
+            if !k.eq_ignore_ascii_case("Room") && !k.eq_ignore_ascii_case("IsEnabled") && !b.contains_key(k) {
+                return Err(format!("RoomList：第 {i} 间未知字段 {k} 被删了"));
+            }
+        }
+    }
+    Ok(())
+}
+
 /// 值收口：新值必须跟原值同一种 JSON 类型；RoomList / StartingOpers 是受控对象数组例外。
 fn check_new_value(key: &str, old: &Value, new: &Value) -> Result<(), String> {
     match (old, new) {
@@ -437,22 +474,7 @@ fn check_new_value(key: &str, old: &Value, new: &Value) -> Result<(), String> {
                 return check_blackflow_priority(b);
             }
             if key.eq_ignore_ascii_case("RoomList") {
-                for it in b {
-                    let o = it.as_object().ok_or_else(|| format!("{key}：每一间得是对象"))?;
-                    let room = o.get("Room").and_then(|x| x.as_str()).unwrap_or("");
-                    if room.is_empty() {
-                        return Err(format!("{key}：每间得带 Room"));
-                    }
-                    for (k, v) in o {
-                        if !k.eq_ignore_ascii_case("Room") && !k.eq_ignore_ascii_case("IsEnabled") {
-                            return Err(format!("{key}：房间对象多出键 {k}"));
-                        }
-                        if !v.is_string() && !v.is_boolean() {
-                            return Err(format!("{key}：{k} 只收文本/开关"));
-                        }
-                    }
-                }
-                return Ok(());
+                return check_room_list(a, b);
             }
             let sample = a.first();
             for it in b {
@@ -943,7 +965,7 @@ fn maa_state(root: &Path, settings: &Value) -> Value {
             "keepQueuesEnabled": strs(ci(&ark, "keepQueuesEnabled")),
             "disableQueues": strs(ci(&ark, "disableQueues")),
             "farmAppend": b_ci(&ark, "farmAppend"),
-            "farmMaxTimesPerRound": i_ci(&ark, "farmMaxTimesPerRound"),
+            "farmMaxTimesPerRound": farm_count_ci(&ark, "farmMaxTimesPerRound"),
             "alsoEnableMainFight": b_ci(&ark, "alsoEnableMainFight"),
             "quitAssistantAfter": b_ci(&rt, "quitAssistantAfter"),
             "closeArknightsAfter": b_ci(&rt, "closeArknightsAfter"),
@@ -1092,6 +1114,59 @@ fn capture_adb_path(paths: &Value) -> PathBuf {
     join_rel(&s_ci(paths, "mumuDir"), &s_ci(paths, "mumuAdb"))
 }
 
+fn mumu_vms(root: &Path, paths: &Value) -> Vec<Value> {
+    let manager = join_rel(&s_ci(paths, "mumuDir"), &s_ci(paths, "mumuManager"));
+    if !manager.is_file() {
+        return Vec::new();
+    }
+    let mut cmd = Command::new(&manager);
+    cmd.args(["info", "--vmindex", "all"]);
+    let Ok((code, out, _)) = crate::control::run_capture(&mut cmd, Duration::from_secs(40)) else {
+        return Vec::new();
+    };
+    if code != 0 {
+        return Vec::new();
+    }
+    let raw = out.join("\n");
+    if raw.trim().is_empty() {
+        return Vec::new();
+    }
+    // 判定仍归内核；这里只把 Vms[].Index/Name 换成前端的小写字段并脱敏。
+    let Ok(d) = call(root, "parse-mumu-vms", &json!({ "raw": raw }), 25) else {
+        return Vec::new();
+    };
+    mumu_vms_from(&d)
+}
+
+fn scrub_atom(s: &str) -> String {
+    let t = s.trim();
+    let bytes = t.as_bytes();
+    let drive = bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/');
+    let unc = bytes.len() >= 2 && bytes[0] == b'\\' && bytes[1] == b'\\';
+    if drive || unc { "<本地路径>".to_string() } else { scrub(s) }
+}
+
+fn mumu_vms_from(d: &Value) -> Vec<Value> {
+    d.get("Vms")
+        .and_then(|x| x.as_array())
+        .map(|a| {
+            a.iter()
+                .filter_map(|vm| {
+                    let index = vm.get("Index")?.as_str()?;
+                    if index.is_empty() || !index.bytes().all(|b| b.is_ascii_digit()) {
+                        return None;
+                    }
+                    let name = vm.get("Name")?.as_str()?;
+                    Some(json!({"index": index, "name": scrub_atom(name)}))
+                })
+                .collect()
+        })
+        .unwrap_or_default()
+}
+
 fn m9a_state(root: &Path, settings: &Value) -> Value {
     let p = ci(settings, "paths").cloned().unwrap_or(json!({}));
     let dir = s_ci(&p, "m9aDir");
@@ -1147,7 +1222,7 @@ fn m9a_state(root: &Path, settings: &Value) -> Value {
         None => (Value::Null, None),
     };
 
-    let mumu = match call(root, "mumu-state", &json!({}), 90) {
+    let mut mumu = match call(root, "mumu-state", &json!({}), 90) {
         Ok(d) => json!({
             "available": d.get("Available").and_then(|x| x.as_bool()).unwrap_or(false),
             "android": d.get("AndroidStarted").and_then(|x| x.as_bool()).unwrap_or(false),
@@ -1157,6 +1232,8 @@ fn m9a_state(root: &Path, settings: &Value) -> Value {
         }),
         Err(e) => json!({"available": false, "android": false, "process": false, "name": "", "index": "", "error": e}),
     };
+    // 清单是独立只读旁路：管理器缺失、超时、非零退出或解析失败都只回空表，不影响上面的状态。
+    mumu["vms"] = json!(mumu_vms(root, &p));
 
     let re = ci(settings, "re1999").cloned().unwrap_or(json!({}));
     let map = ci(&re, "planToInstance").cloned().unwrap_or(json!({}));
@@ -1532,11 +1609,28 @@ fn m9a_apply_selection(node: &mut Value, def: &Value, one: Option<&Value>, many:
         "checkbox" => {
             let arr = many.and_then(|x| x.as_array()).ok_or_else(|| format!("{name}：复选框只收 case 名数组"))?;
             if arr.len() > 256 { return Err(format!("{name}：候选太多")); }
-            let mut selected = Vec::new();
+            let old = m9a_string_list(obj.get("selected_cases"));
+            let mut requested = Vec::new();
             for x in arr {
                 let s = x.as_str().ok_or_else(|| format!("{name}：case 名只能是文本"))?;
-                if m9a_case_index(def, s).is_none() { return Err(format!("{name}：候选里没有 {s}")); }
-                if !selected.iter().any(|v| v == s) { selected.push(s.to_string()); }
+                if m9a_case_index(def, s).is_none() && !old.iter().any(|v| v == s) {
+                    return Err(format!("{name}：候选里没有 {s}"));
+                }
+                if m9a_case_index(def, s).is_some() && !requested.iter().any(|v| v == s) {
+                    requested.push(s.to_string());
+                }
+            }
+            // 目录外的旧 case 只允许保留，不允许客户端新造；以最新磁盘值的顺序保留它们。
+            let mut selected = Vec::new();
+            for s in old {
+                if m9a_case_index(def, &s).is_none() {
+                    if !selected.iter().any(|v| v == &s) { selected.push(s); }
+                } else if requested.iter().any(|v| v == &s) {
+                    selected.push(s);
+                }
+            }
+            for s in requested {
+                if !selected.iter().any(|v| v == &s) { selected.push(s); }
             }
             m9a_remove_keys(obj, &["index", "selected_case"]);
             obj.insert("selected_cases".to_string(), json!(selected));
@@ -2015,8 +2109,8 @@ fn coerce(kind: Kind, v: &Value) -> Result<Value, String> {
         Kind::Bool => v.as_bool().map(Value::Bool).ok_or_else(|| "只收 true/false".to_string()),
         Kind::Int => {
             let n = v.as_i64().ok_or_else(|| "只收整数".to_string())?;
-            if !(0..=9999).contains(&n) {
-                return Err("数值超出范围（0~9999）".to_string());
+            if !(1..=30).contains(&n) {
+                return Err("数值超出范围（1~30）".to_string());
             }
             Ok(json!(n))
         }
@@ -2047,6 +2141,15 @@ fn coerce(kind: Kind, v: &Value) -> Result<Value, String> {
             Ok(Value::Array(out))
         }
     }
+}
+
+fn coerce_plan_value(key: &str, kind: Kind, current: &Value, input: &Value) -> Result<Value, String> {
+    if key == "ark.farmMaxTimesPerRound" {
+        let old = current.as_i64().ok_or_else(|| "settings.json 里 ark.farmMaxTimesPerRound 不是整数；面板不猜默认值，也不覆盖".to_string())?;
+        // 旧 0 只允许原样保留；内核实际按 1 次，不补刷应关闭 farmAppend。
+        if input.as_i64() == Some(0) && old == 0 { return Ok(json!(0)); }
+    }
+    coerce(kind, input)
 }
 
 fn get_path<'a>(v: &'a Value, path: &str) -> Option<&'a Value> {
@@ -2265,11 +2368,12 @@ fn save_plan_locked(root: &Path, edits: Vec<Value>) -> Result<Value, String> {
         }
         seen.push(key.clone());
         let spec = spec_for(&key).ok_or_else(|| format!("面板不改这个键：{key}"))?;
-        let val = coerce(spec.kind, e.get("value").unwrap_or(&Value::Null))
-            .map_err(|m| format!("{key}：{m}"))?;
         let current = get_path(&before, &key).ok_or_else(|| {
             format!("settings.json 里没有 {key} 这一项（老配置？跑 setup.ps1 或手动补一行再回来）")
         })?;
+        let input = e.get("value").unwrap_or(&Value::Null);
+        let val = coerce_plan_value(&key, spec.kind, current, input)
+            .map_err(|m| format!("{key}：{m}"))?;
         if spec.kind == Kind::Bool && !current.is_boolean() {
             return Err(format!("settings.json 里 {key} 不是布尔值；面板不猜默认值，也不覆盖"));
         }
@@ -2394,6 +2498,23 @@ mod selftest {
     }
 
     #[test]
+    fn mumu_vms_only_returns_scrubbed_index_and_name() {
+        let d = json!({"Vms": [
+            {"Index": "0", "Name": "主力机", "Path": "C:\\private\\vm"},
+            {"Index": "12", "Name": "D:\\private\\别名"},
+            {"Index": "13", "Name": "D:\\Program Files\\MuMu\\Private"},
+            {"Index": "bad", "Name": "不应返回"}
+        ], "Raw": "sensitive"});
+        assert_eq!(mumu_vms_from(&d), vec![
+            json!({"index": "0", "name": "主力机"}),
+            json!({"index": "12", "name": "<本地路径>"}),
+            json!({"index": "13", "name": "<本地路径>"})
+        ]);
+        assert!(mumu_vms_from(&json!({})).is_empty());
+        assert!(mumu_vms_from(&json!({"Vms": null})).is_empty());
+    }
+
+    #[test]
     fn whitelist_is_explicit() {
         assert!(spec_for("ark.defaultStage").is_some());
         assert!(spec_for("ark.alsoEnableMainFight").is_some());
@@ -2480,9 +2601,24 @@ mod selftest {
         assert!(coerce(Kind::Bool, &json!(true)).is_ok());
         assert!(coerce(Kind::Bool, &json!("true")).is_err());
         assert!(coerce(Kind::Int, &json!(12)).is_ok());
+        assert!(coerce(Kind::Int, &json!(30)).is_ok());
+        assert!(coerce(Kind::Int, &json!(0)).is_err());
+        assert!(coerce(Kind::Int, &json!(31)).is_err());
         assert!(coerce(Kind::Int, &json!(-1)).is_err());
         assert!(coerce(Kind::StrList, &json!(["A", " B ", ""])).unwrap() == json!(["A", "B"]));
         assert!(coerce(Kind::Str, &json!("x\u{0}y")).is_err());
+    }
+
+    #[test]
+    fn farm_count_keeps_legacy_zero_but_marks_bad_types() {
+        assert_eq!(farm_count_ci(&json!({"farmMaxTimesPerRound": 12}), "farmMaxTimesPerRound"), json!(12));
+        assert_eq!(farm_count_ci(&json!({"farmMaxTimesPerRound": 0}), "farmMaxTimesPerRound"), json!(0));
+        assert_eq!(farm_count_ci(&json!({"farmMaxTimesPerRound": "12"}), "farmMaxTimesPerRound"), Value::Null);
+        assert_eq!(farm_count_ci(&json!({}), "farmMaxTimesPerRound"), Value::Null);
+        assert_eq!(coerce_plan_value("ark.farmMaxTimesPerRound", Kind::Int, &json!(0), &json!(0)).unwrap(), json!(0));
+        assert!(coerce_plan_value("ark.farmMaxTimesPerRound", Kind::Int, &json!(12), &json!(0)).is_err());
+        assert!(coerce_plan_value("ark.farmMaxTimesPerRound", Kind::Int, &json!(12), &json!(31)).is_err());
+        assert!(coerce_plan_value("ark.farmMaxTimesPerRound", Kind::Int, &json!("12"), &json!(12)).is_err());
     }
 
     fn fixture() -> String {
@@ -2564,10 +2700,13 @@ mod selftest {
     /// 只读，不写；仓库里没有 settings.json 时跳过（CI/移植环境）。
     #[test]
     fn real_settings_spans_line_up() {
-        let p = Path::new("../../config/settings.json");
-        let raw = match fs::read(p) {
+        let p = Path::new(env!("CARGO_MANIFEST_DIR")).join("../../../config/settings.json");
+        let raw = match fs::read(&p) {
             Ok(b) => b,
-            Err(_) => return,
+            Err(_) => {
+                eprintln!("SKIP real_settings_spans_line_up：仓库根 config/settings.json 不在，只读样本测试跳过");
+                return;
+            }
         };
         let body = if raw.starts_with(&[0xEF, 0xBB, 0xBF]) { &raw[3..] } else { &raw[..] };
         let text = std::str::from_utf8(body).unwrap();
@@ -2602,13 +2741,27 @@ mod selftest {
             "re1999.planToInstance.rerun",
             "mumu.vmIndex",
         ];
+        let mut present = 0usize;
         for k in keys {
             let spec = spec_for(k).unwrap();
-            let (vs, ve) = value_span(text, &spec).unwrap_or_else(|| panic!("{k} 定位不到"));
-            let span: Value = serde_json::from_str(text[vs..ve].trim())
-                .unwrap_or_else(|e| panic!("{k} 的文本区间不合法：{e}"));
-            assert_eq!(span, *get_path(&v, k).unwrap(), "{k} 的文本区间跟 JSON 值不一致");
+            match get_path(&v, k) {
+                Some(value) => {
+                    let (vs, ve) = value_span(text, &spec).unwrap_or_else(|| panic!("{k} 定位不到"));
+                    let span: Value = serde_json::from_str(text[vs..ve].trim())
+                        .unwrap_or_else(|e| panic!("{k} 的文本区间不合法：{e}"));
+                    if span != *value {
+                        panic!("{k} 的文本区间跟 JSON 值不一致（不回显配置值）");
+                    }
+                    present += 1;
+                }
+                None => {
+                    // 旧配置可以缺可选键；写盘本就拒绝补键。缺键与定位不到必须分开判。
+                    assert!(value_span(text, &spec).is_none(), "{k} 实际缺键，文本定位却报在位");
+                    eprintln!("SKIP {k}：真实配置缺这个可选键");
+                }
+            }
         }
+        assert!(present > 0, "真实配置没有任一受测键，样本等于没读");
     }
 
     #[test]
@@ -2762,26 +2915,38 @@ mod selftest {
     #[test]
     fn maa_patch_rooms_and_noop() {
         let t = maa_fixture();
-        let p = patch_of(vec![(
-            "RoomList",
-            json!([{"Room": "Power", "IsEnabled": false}, {"Room": "Mfg"}, {"Room": "Dorm", "IsEnabled": true}]),
-        )]);
+        let p = patch_of(vec![("RoomList", json!([{"Room": "Power", "IsEnabled": false}]))]);
         let (out, changed) = apply_task_patch(&t, 1, "Infrast", "基建换班", &p).unwrap();
         assert_eq!(changed, vec!["RoomList".to_string()]);
         let v: Value = serde_json::from_str(&out).unwrap();
-        let rooms = &v["Configurations"]["Default"]["TaskQueue"][1]["RoomList"];
-        assert_eq!(rooms[0]["IsEnabled"], json!(false));
-        assert_eq!(rooms[1]["Room"], json!("Mfg"));
-        assert_eq!(rooms[2]["IsEnabled"], json!(true));
-        // 房间对象只许 Room/IsEnabled。
-        assert!(apply_task_patch(
-            &t,
-            1,
-            "Infrast",
-            "基建换班",
-            &patch_of(vec![("RoomList", json!([{"Room": "Power", "X": 1}]))])
-        )
-        .is_err());
+        assert_eq!(v["Configurations"]["Default"]["TaskQueue"][1]["RoomList"][0]["IsEnabled"], json!(false));
+
+        let rich = t.replace(
+            "\"Room\": \"Power\"",
+            "\"Room\": \"Power\", \"IsEnabled\": true, \"FutureFlag\": {\"keep\": 1}",
+        );
+        let keep_extra = patch_of(vec![("RoomList", json!([{
+            "Room": "Power", "IsEnabled": false, "FutureFlag": {"keep": 1}
+        }]))]);
+        let (out, _) = apply_task_patch(&rich, 1, "Infrast", "基建换班", &keep_extra).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["Configurations"]["Default"]["TaskQueue"][1]["RoomList"][0]["FutureFlag"], json!({"keep": 1}));
+        // 面板不能借房间开关改写/删除未知字段，也不能增删或重排房间。
+        let bad_extra = patch_of(vec![(
+            "RoomList", json!([{"Room": "Power", "IsEnabled": false, "FutureFlag": {"keep": 2}}])
+        )]);
+        assert!(apply_task_patch(&rich, 1, "Infrast", "基建换班", &bad_extra).is_err());
+        let missing_extra = patch_of(vec![(
+            "RoomList", json!([{"Room": "Power", "IsEnabled": false}])
+        )]);
+        assert!(apply_task_patch(&rich, 1, "Infrast", "基建换班", &missing_extra).is_err());
+        let resized = patch_of(vec![(
+            "RoomList", json!([
+                {"Room": "Power", "IsEnabled": false, "FutureFlag": {"keep": 1}},
+                {"Room": "Mfg", "FutureFlag": {"keep": 1}}
+            ])
+        )]);
+        assert!(apply_task_patch(&rich, 1, "Infrast", "基建换班", &resized).is_err());
         // 同一值再改一次：不写、不回键。
         let p = patch_of(vec![("DormThreshold", json!(30))]);
         let (out2, changed2) = apply_task_patch(&t, 1, "Infrast", "基建换班", &p).unwrap();
@@ -2881,6 +3046,28 @@ mod selftest {
         assert!(changed.iter().any(|x| x.starts_with("TaskItems")));
         // 同一根成员被多个选项改动命中时，文本计划必须去重，不能叠 span。
         assert!(serde_json::from_str::<Value>(&out).is_ok());
+    }
+
+    #[test]
+    fn m9a_checkbox_preserves_unknown_cases_but_rejects_new_ones() {
+        let t = m9a_fixture().replace(
+            "  \"TaskItems\": [],",
+            "  \"TaskItems\": [{\"name\":\"Bank\",\"option\":[{\"name\":\"多层\",\"selected_cases\":[\"LegacyUnknown\",\"One\"]}]}],",
+        );
+        let cat = m9a_catalog_fixture();
+        let run = |cases: Value| apply_m9a_instance_patch(&t, "测试实例", &json!({
+            "name":"测试实例",
+            "optionEdits":[{"source":"task","task":0,"path":["多层"],"selected_cases":cases}]
+        }), &cat);
+        let (out, _) = run(json!(["Two", "One", "LegacyUnknown"])).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["TaskItems"][0]["option"][0]["selected_cases"],
+            json!(["LegacyUnknown", "One", "Two"]), "未知项按磁盘顺序保留，已知项按旧序＋新增序合并");
+        let (out, _) = run(json!(["Two"])).unwrap();
+        let v: Value = serde_json::from_str(&out).unwrap();
+        assert_eq!(v["TaskItems"][0]["option"][0]["selected_cases"],
+            json!(["LegacyUnknown", "Two"]), "取消已知项不能连坐未知现值");
+        assert!(run(json!(["Two", "Invented"])).is_err(), "面板不能新造目录外 case");
     }
 
     #[test]

@@ -49,6 +49,7 @@ function setBusy(on: boolean, text = ''): void {
   document.querySelectorAll<HTMLButtonElement>('#aBody [data-act], #aBody [data-save], #aBody [data-tog], #aBody [data-tab]').forEach((b) => {
     b.disabled = on;
   });
+  document.querySelectorAll<HTMLSelectElement>('#aBody select[data-k]').forEach((s) => { s.disabled = on; });
 }
 
 function chip(label: string, ok: boolean | null, on = '在'): string {
@@ -56,11 +57,59 @@ function chip(label: string, ok: boolean | null, on = '在'): string {
   return '<span class="asChip' + (ok ? ' on' : '') + '">' + esc(label) + ' <b class="' + (ok ? 'mok' : 'mwarn') + '">' + esc(ok ? on : '否') + '</b></span>';
 }
 
-function field(label: string, key: string, value: string, opt: { list?: boolean; int?: boolean; hint?: string } = {}): string {
-  const attrs = 'class="asIn" data-k="' + esc(key) + '" value="' + esc(value) + '"' +
-    (opt.list ? ' data-list="1"' : '') + (opt.int ? ' data-int="1" type="number"' : '');
-  return '<label class="asF"><span>' + esc(label) + '</span><input ' + attrs + '>' +
-    (opt.hint ? '<i>' + esc(opt.hint) + '</i>' : '') + '</label>';
+type Choice = [string, string];
+
+function uniqueChoices(groups: Choice[][]): Choice[] {
+  const seen = new Set<string>();
+  const out: Choice[] = [];
+  for (const group of groups) for (const [value, label] of group) {
+    if (seen.has(value)) continue;
+    seen.add(value);
+    out.push([value, label]);
+  }
+  return out;
+}
+
+function selectField(label: string, key: string, value: string, opts: Choice[], hint = '', currentLabel = ''): string {
+  const choices = uniqueChoices([opts, [[value, currentLabel || (value ? value + '（现值）' : '（未设置）')]]]);
+  return '<label class="asF"><span>' + esc(label) + '</span><select class="asSel" data-k="' + esc(key) + '">' +
+    choices.map(([v, text]) => '<option value="' + esc(v) + '"' + (v === value ? ' selected' : '') + '>' + esc(text) + '</option>').join('') +
+    '</select>' + (hint ? '<i>' + esc(hint) + '</i>' : '') + '</label>';
+}
+
+function multiSelectField(label: string, key: string, values: string[], opts: Choice[], hint = '', currentFirst = false): string {
+  const selected = new Set(values);
+  const known = new Set(opts.map(([v]) => v));
+  const head = values.map((v) => [v, currentFirst && known.has(v) ? v : v + '（现值）'] as Choice);
+  const choices = uniqueChoices(currentFirst ? [head, opts] : [opts, head]);
+  return '<label class="asF"><span>' + esc(label) + '</span><select class="asSel" multiple data-k="' + esc(key) + '" data-multi="1" size="' +
+    Math.min(6, Math.max(3, choices.length)) + '">' +
+    choices.map(([v, text]) => '<option value="' + esc(v) + '"' + (selected.has(v) ? ' selected' : '') + '>' + esc(text) + '</option>').join('') +
+    '</select>' + (hint ? '<i>' + esc(hint) + '</i>' : '') + '</label>';
+}
+
+const FARM_COUNTS: Choice[] = Array.from({ length: 30 }, (_, i) =>
+  [String(i + 1), String(i + 1) + ' 次'] as Choice);
+function finishSanityChoices(m: MaaState, current: string): Choice[] {
+  // 内核按 Fight 任务 Name 匹配，不是固定枚举；自定义任务名也必须原样可选。
+  const rows = m.tasks.filter((t) => t.type.toLowerCase() === 'fight' && t.name)
+    .map((t) => [t.name, t.name] as Choice);
+  return uniqueChoices([rows, current ? [[current, current + '（现值）']] : []]);
+}
+
+const MAA_QUEUES: Choice[] = [
+  ['StartUp', '启动'], ['Recruit', '公招'], ['Infrast', '基建'], ['Fight', '战斗'],
+  ['Mall', '信用购物'], ['Award', '奖励'], ['Roguelike', '肉鸽'], ['Reclamation', '生息演算'],
+];
+
+function instanceChoices(m: M9aState, current: string): Choice[] {
+  const rows = m.instances.map((it) => [it.name || it.id, it.name || it.id] as Choice);
+  return uniqueChoices([rows, current ? [[current, current + '（现值）']] : []]);
+}
+
+function vmChoices(m: M9aState, current: string): Choice[] {
+  const rows = (m.mumu.vms || []).map((vm) => [vm.index, vm.name ? vm.name + ' · ' + vm.index : vm.index] as Choice);
+  return uniqueChoices([rows, current ? [[current, current + '（现值）']] : []]);
 }
 
 function toggle(label: string, key: string, on: boolean, hint = ''): string {
@@ -69,8 +118,9 @@ function toggle(label: string, key: string, on: boolean, hint = ''): string {
     (hint ? '<i>' + esc(hint) + '</i>' : '') + '</div>';
 }
 
-function readonly(label: string, value: string): string {
-  return '<div class="asF"><span>' + esc(label) + '</span><b class="asRo">' + esc(value || '—') + '</b></div>';
+function readonly(label: string, value: string, hint = ''): string {
+  return '<div class="asF"><span>' + esc(label) + '</span><b class="asRo">' + esc(value || '—') + '</b>' +
+    (hint ? '<i>' + esc(hint) + '</i>' : '') + '</div>';
 }
 
 /* ── 两块页面 ── */
@@ -91,11 +141,15 @@ function maaHtml(m: MaaState | null): string {
     '<div class="sec">日常队列（MAA 配置件实读，只展示）</div><div class="asQRow">' + q + '</div>' +
     '<div class="sec">计划（保存后写回 config/settings.json；下一轮按新计划跑）</div>' +
     '<div class="asGrid">' +
-      field('默认关卡', 'ark.defaultStage', p.defaultStage, { hint: '活动未开时刷这关' }) +
-      field('理智清空方式', 'ark.finishAllSanityWith', p.finishAllSanityWith) +
-      field('每轮最多补刷', 'ark.farmMaxTimesPerRound', String(p.farmMaxTimesPerRound), { int: true }) +
-      field('保留队列', 'ark.keepQueuesEnabled', p.keepQueuesEnabled.join(', '), { list: true, hint: '逗号分隔' }) +
-      field('禁用队列', 'ark.disableQueues', p.disableQueues.join(', '), { list: true, hint: '逗号分隔' }) +
+      multiSelectField('默认关卡', 'ark.defaultStage', p.defaultStage.split(/[,，、]/).map((x) => x.trim()).filter(Boolean),
+        (m.catalogs?.stages || []).map((x) => [x, x] as Choice), '按住 Ctrl 多选；保存顺序按下方候选顺序，不按勾选先后', true) +
+      selectField('理智清空方式', 'ark.finishAllSanityWith', p.finishAllSanityWith, finishSanityChoices(m, p.finishAllSanityWith), '候选取 MAA 的战斗任务名') +
+      (typeof p.farmMaxTimesPerRound === 'number'
+        ? selectField('每轮最多补刷', 'ark.farmMaxTimesPerRound', String(p.farmMaxTimesPerRound), FARM_COUNTS,
+          '不补刷请关闭「长草追加补刷」', p.farmMaxTimesPerRound === 0 ? '0 · 现值（内核实际按 1 次）' : '')
+        : readonly('每轮最多补刷', '现值类型异常', '面板不覆盖；请先在配置里修正为 1~30 的整数')) +
+      multiSelectField('保留队列', 'ark.keepQueuesEnabled', p.keepQueuesEnabled, MAA_QUEUES, '按住 Ctrl 多选') +
+      multiSelectField('禁用队列', 'ark.disableQueues', p.disableQueues, MAA_QUEUES, '按住 Ctrl 多选') +
       toggle('长草追加补刷', 'ark.farmAppend', p.farmAppend) +
       toggle('同时开主关卡', 'ark.alsoEnableMainFight', p.alsoEnableMainFight) +
       toggle('跑完关 MAA', 'runtime.quitAssistantAfter', p.quitAssistantAfter, '关掉后"关闭 MAA"不会动手') +
@@ -151,10 +205,10 @@ function m9aHtml(m: M9aState | null): string {
       (mm.error ? ' <b class="mwarn">' + esc(mm.error) + '</b>' : '') + '</div>' +
     '<div class="sec">计划（保存后写回 config/settings.json）</div>' +
     '<div class="asGrid">' +
-      field('长草 → 实例', 're1999.planToInstance.idle', p.idle) +
-      field('活动 → 实例', 're1999.planToInstance.event', p.event) +
-      field('复刻 → 实例', 're1999.planToInstance.rerun', p.rerun) +
-      field('模拟器编号', 'mumu.vmIndex', p.vmIndex) +
+      selectField('长草 → 实例', 're1999.planToInstance.idle', p.idle, instanceChoices(m, p.idle)) +
+      selectField('活动 → 实例', 're1999.planToInstance.event', p.event, instanceChoices(m, p.event)) +
+      selectField('复刻 → 实例', 're1999.planToInstance.rerun', p.rerun, instanceChoices(m, p.rerun)) +
+      selectField('模拟器编号', 'mumu.vmIndex', p.vmIndex, vmChoices(m, p.vmIndex)) +
       toggle('主线需确认', 're1999.mainStoryRequiresAck', p.mainStoryRequiresAck) +
       toggle('商店买完即停活动', 're1999.shopDoneStopsEvent', p.shopDoneStopsEvent) +
       toggle('CLI 转发参数', 'runtime.m9aCliArgs', p.m9aCliArgs) +
@@ -223,20 +277,28 @@ async function reload(): Promise<void> {
 async function doSave(): Promise<void> {
   if (!bridge || busy) return;
   const edits: { key: string; value: unknown }[] = [];
-  document.querySelectorAll<HTMLInputElement>('#aBody input[data-k]').forEach((f) => {
-    const key = f.dataset.k || '';
-    if (!key) return;
-    if (f.dataset.list) {
-      const list = f.value.split(/[,，、\n]/).map((s) => s.trim()).filter((s) => s.length > 0);
-      edits.push({ key, value: list });
-    } else if (f.dataset.int) {
-      const n = Number(f.value);
-      if (!Number.isFinite(n)) { logLine('WARN', key + ' 不是数字，没提交'); return; }
-      edits.push({ key, value: Math.round(n) });
+  for (const s of Array.from(document.querySelectorAll<HTMLSelectElement>('#aBody select[data-k]'))) {
+    const key = s.dataset.k || '';
+    if (!key) continue;
+    if (s.dataset.multi) {
+      const values = Array.from(s.selectedOptions).map((o) => o.value);
+      if (key === 'ark.defaultStage' && !values.length) {
+        logLine('WARN', 'ark.defaultStage 至少留一关，整次保存已取消');
+        return;
+      }
+      edits.push({ key, value: key === 'ark.defaultStage' ? values.join(',') : values });
+    } else if (key === 'ark.farmMaxTimesPerRound') {
+      const n = Number(s.value);
+      const before = data?.maa?.plan.farmMaxTimesPerRound;
+      // 旧 0 或越界现值只在用户实际改动时才校验；原样保存不得顺带覆盖异常旧值。
+      if (n !== before) {
+        if (!Number.isSafeInteger(n) || n < 1 || n > 30) { logLine('WARN', key + ' 合法范围是 1~30，整次保存已取消'); return; }
+        edits.push({ key, value: n });
+      }
     } else {
-      edits.push({ key, value: f.value.trim() });
+      edits.push({ key, value: s.value });
     }
-  });
+  }
   document.querySelectorAll<HTMLElement>('#aBody [data-tog]').forEach((t) => {
     const key = t.dataset.tog || '';
     if (key) edits.push({ key, value: t.dataset.v === '1' });

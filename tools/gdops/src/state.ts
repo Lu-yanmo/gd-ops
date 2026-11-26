@@ -48,7 +48,7 @@ export const SW: SwitchDef[] = [
 export const live = {
   state: 'idle', alive: '—', age: '—', action: 'none', hot: false,
   vcalls: 'qwen-vl · 200 · 1.8s',
-  capture: { active: false, state: 'paused', updated: 0, error: '', stale: false } as CaptureView,
+  capture: { active: false, state: 'paused', updated: 0, error: '', note: '', stale: false } as CaptureView,
 };
 export let lastRoundHtml = '上一轮：<b>今日 19:30 · 全成</b> · 24m12s · ark ok / r1999 ok（history.csv 尾行·演示）';
 
@@ -174,7 +174,7 @@ export function enterLive(): void {
   live.age = '—';
   live.action = 'none';
   live.vcalls = '—';
-  live.capture = { active: false, state: 'paused', updated: 0, error: '', stale: false };
+  live.capture = { active: false, state: 'paused', updated: 0, error: '', note: '', stale: false };
 }
 
 // 运行锁：起/停只在这里翻一次牌（日志也只写一次），轮询本身不刷屏。

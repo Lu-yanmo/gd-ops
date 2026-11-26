@@ -486,13 +486,23 @@ body::after{content:"";position:fixed;inset:0;z-index:91;pointer-events:none;opa
 .asQ{font-family:var(--font-mono);font-size:10px;color:var(--accent);border:1px solid var(--line);
   background:rgba(6,14,26,.5);padding:2px 7px}
 .asGrid{display:grid;grid-template-columns:1fr 1fr;gap:7px 16px;margin-top:6px}
-.asF{display:grid;grid-template-columns:96px 1fr;align-items:center;gap:8px;min-height:26px}
+.asF{display:grid;grid-template-columns:96px minmax(0,1fr);align-items:center;gap:8px;min-height:26px;min-width:0}
 .asF>span{font-size:10px;color:var(--muted);letter-spacing:.6px}
 .asF>i{grid-column:2;font-style:normal;font-size:9px;color:var(--muted);opacity:.75;line-height:1.4}
 .asF>input.asIn{grid-column:2;width:100%;box-sizing:border-box;background:rgba(6,14,26,.8);border:1px solid var(--line-strong);
   color:var(--text);font-family:var(--font-mono);font-size:11px;padding:3px 7px}
 .asF>input.asIn:focus{outline:none;border-color:var(--accent);box-shadow:0 0 0 1px var(--accent-dim)}
 .asF>input.asIn:disabled{opacity:.5}
+.asF>select.asSel{grid-column:2;width:100%;max-width:100%;min-width:0;box-sizing:border-box;
+  appearance:none;-webkit-appearance:none;background:rgba(6,14,26,.8) url("data:image/svg+xml;charset=utf-8,%3Csvg xmlns='http://www.w3.org/2000/svg' width='9' height='6'%3E%3Cpath d='M0 0l4.5 6L9 0z' fill='%237fa9b8'/%3E%3C/svg%3E") no-repeat right 8px center;
+  border:1px solid var(--line-strong);color:var(--text);font-family:var(--font-mono);font-size:11px;
+  padding:3px 24px 3px 7px;cursor:pointer}
+.asF>select.asSel:focus,.asF>select.asSel:focus-visible{outline:none;border-color:var(--accent);box-shadow:0 0 0 1px var(--accent-dim)}
+.asF>select.asSel[multiple]{background-image:none;padding:3px 7px;line-height:1.4;cursor:default}
+.asF>select.asSel option{background:var(--bg1);color:var(--text)}
+.asF>select.asSel option:checked{background:var(--accent-dim);color:var(--text)}
+.asF>select.asSel option:disabled{color:var(--muted)}
+.asF>select.asSel:disabled{opacity:.5;cursor:not-allowed}
 .asTog{grid-column:2;justify-self:start;font-family:var(--font-label);font-size:10px;letter-spacing:1px;min-width:58px;
   color:var(--muted);background:transparent;border:1px solid var(--line-strong);padding:3px 10px;cursor:pointer;transition:all .2s}
 .asTog.on{color:var(--accent);border-color:var(--accent);background:var(--accent-dim)}

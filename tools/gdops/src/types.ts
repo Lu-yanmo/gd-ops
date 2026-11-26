@@ -106,7 +106,7 @@ export interface MaaPlan {
   keepQueuesEnabled: string[];
   disableQueues: string[];
   farmAppend: boolean;
-  farmMaxTimesPerRound: number;
+  farmMaxTimesPerRound: number | null; // null = 缺键或旧值类型异常；面板只读，不猜成 0
   alsoEnableMainFight: boolean;
   quitAssistantAfter: boolean;
   closeArknightsAfter: boolean;
@@ -254,6 +254,7 @@ export interface M9aState {
     process: boolean;
     name: string;
     index: string;
+    vms?: { index: string; name: string }[];
     error?: string;
   };
   plan: M9aPlan;
@@ -274,6 +275,8 @@ export interface CaptureFrame {
   height?: number;
   capturedAt?: number;
   meanLuma?: number;
+  captureMs?: number;
+  encodedBytes?: number;
   error?: string;
   note?: string;
 }
@@ -283,7 +286,11 @@ export interface CaptureView {
   source?: CaptureFrame['source'];
   updated: number;
   error: string;
+  note: string;
   stale: boolean;
+  fps?: number;
+  captureMs?: number;
+  encodedBytes?: number;
 }
 
 export interface AssistState {

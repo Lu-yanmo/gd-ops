@@ -172,15 +172,19 @@ export class TauriBridge extends DemoBridge {
       const v = raw as CaptureFrame;
       const states: CaptureFrame['state'][] = ['ready', 'dark', 'connecting', 'paused', 'missing', 'minimized', 'offline', 'failed', 'unsupported'];
       if (!v || typeof v.ok !== 'boolean' || !states.includes(v.state)
-        || (v.source !== undefined && v.source !== 'window' && v.source !== 'adb')) {
+        || (v.source !== undefined && v.source !== 'window' && v.source !== 'adb')
+        || (v.ok && v.source === undefined)) {
         return { ok: false, state: 'failed', error: '实时画面回执形态异常' };
       }
       if (v.ok) {
         const validStamp = Number.isSafeInteger(v.capturedAt) && (v.capturedAt as number) > 0
-          && (v.capturedAt as number) <= Date.now() + 2000;
-        if (typeof v.image !== 'string' || !/^data:image\/png;base64,[A-Za-z0-9+/=]+$/.test(v.image)
+          && (v.capturedAt as number) <= Date.now();
+        if (typeof v.image !== 'string' || !/^data:image\/(?:png|jpeg);base64,[A-Za-z0-9+/=]+$/.test(v.image)
           || v.image.length > 24_000_000 || !validStamp
-          || !Number.isFinite(v.width) || !Number.isFinite(v.height)) {
+          || !Number.isInteger(v.width) || !Number.isInteger(v.height)
+          || (v.width as number) <= 0 || (v.height as number) <= 0
+          || (v.captureMs !== undefined && (!Number.isFinite(v.captureMs) || v.captureMs < 0))
+          || (v.encodedBytes !== undefined && (!Number.isInteger(v.encodedBytes) || v.encodedBytes <= 0))) {
           return { ok: false, state: 'failed', error: '实时画面数据校验失败' };
         }
       } else if (v.image !== undefined) {
